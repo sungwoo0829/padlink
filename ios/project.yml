@@ -1,0 +1,73 @@
+name: PadLink
+options:
+  bundleIdPrefix: io.github.sungwoo0829
+  deploymentTarget:
+    iOS: "17.5"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "2"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 서명은 SideStore가 설치할 때 한다
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  PadLink:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    info:
+      path: Generated/App-Info.plist
+      properties:
+        CFBundleDisplayName: PadLink
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSLocalNetworkUsageDescription: PC와 화면·소리를 주고받기 위해 로컬 네트워크를 사용합니다.
+        NSBonjourServices:
+          - _padlink._tcp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.sungwoo0829.padlink
+    dependencies:
+      - target: PadLinkBroadcast
+    scheme: {}
+
+  PadLinkBroadcast:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Broadcast
+      - Shared
+    info:
+      path: Generated/Broadcast-Info.plist
+      properties:
+        CFBundleDisplayName: PadLink 송출
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSLocalNetworkUsageDescription: PC와 화면·소리를 주고받기 위해 로컬 네트워크를 사용합니다.
+        NSBonjourServices:
+          - _padlink._tcp
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          NSExtensionAttributes:
+            RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.sungwoo0829.padlink.broadcast

@@ -1,0 +1,7 @@
+# XcodeGen 산출물
+ios/*.xcodeproj
+ios/Generated/
+build/
+Payload/
+*.ipa
+.DS_Store
