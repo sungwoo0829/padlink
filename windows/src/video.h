@@ -44,7 +44,7 @@ private:
 
     void Thread();
     bool InitDecoder();
-    bool NegotiateOutput();
+    bool NegotiateOutput(bool announce = true);
     void Decode(Packet& p);
     void Drain();
     void Render();

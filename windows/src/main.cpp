@@ -47,6 +47,8 @@ std::wstring g_linkStatus = L"연결 안 함";
 uint64_t g_lastBytes = 0;
 uint64_t g_lastFrames = 0;
 ULONGLONG g_lastTick = 0;
+std::wstring g_lastStatus;
+int g_statusTicks = 0;
 
 int S(int v) { return int(v * g_scale + 0.5f); }
 
@@ -145,6 +147,7 @@ void ApplyAudio() {
 
 void ToggleConnect() {
     if (g_receiver.Running()) {
+        if (!g_lastStatus.empty()) Log(L"마지막 상태: " + g_lastStatus);
         g_receiver.Stop();
         SetWindowTextW(Item(ID_CONNECT), L"연결");
         g_linkStatus = L"연결 안 함";
@@ -200,6 +203,9 @@ void UpdateStatus() {
         line2 = L"소리 꺼짐 — fmod.dll 필요 (로그 참고)";
     }
     SetWindowTextW(Item(ID_STATUS), (line1 + L"\r\n" + line2 + L"\r\n" + line3).c_str());
+    // 원격으로 상태를 볼 수 있게 연결 중에는 1분마다 로그에도 남긴다
+    g_lastStatus = line1 + L" | " + line2 + L" | " + line3;
+    if (g_receiver.connected && ++g_statusTicks % 60 == 0) Log(L"상태: " + g_lastStatus);
 }
 
 void CreateControls() {

@@ -204,13 +204,14 @@ bool VideoPipeline::InitDecoder() {
         Log(Format(L"디코더 입력 형식 설정 실패 0x%08X", (unsigned)hr));
         return false;
     }
-    if (!NegotiateOutput()) return false;
+    // 첫 SPS가 오기 전 기본 형식(1920x1080)은 실제 영상이 아니므로 로그에 남기지 않는다
+    if (!NegotiateOutput(false)) return false;
     decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     return true;
 }
 
-bool VideoPipeline::NegotiateOutput() {
+bool VideoPipeline::NegotiateOutput(bool announce) {
     for (DWORD i = 0;; ++i) {
         ComPtr<IMFMediaType> type;
         if (FAILED(decoder_->GetOutputAvailableType(0, i, &type))) break;
@@ -241,7 +242,7 @@ bool VideoPipeline::NegotiateOutput() {
         width = crop_.right - crop_.left;
         height = crop_.bottom - crop_.top;
         inputViews_.clear();
-        if (w > 0) Log(Format(L"영상 %ux%u (표시 %dx%d, %ls)", w, h, width.load(), height.load(),
+        if (announce && w > 0) Log(Format(L"영상 %ux%u (표시 %dx%d, %ls)", w, h, width.load(), height.load(),
                               fullRange_ ? L"0-255" : L"16-235"));
         return true;
     }
