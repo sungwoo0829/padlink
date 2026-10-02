@@ -32,6 +32,12 @@ Settings LoadSettings() {
     s.discordVolume = ReadInt(L"audio", L"discord_volume", s.discordVolume);
     s.asioDspBuffer = ReadInt(L"audio", L"asio_dsp_buffer", s.asioDspBuffer);
     s.rotation = ReadInt(L"video", L"rotation", s.rotation) & 3;
+    s.penMonitor = ReadString(L"pen", L"monitor", s.penMonitor);
+    s.squeezeKeys = ReadString(L"pen", L"squeeze", s.squeezeKeys);
+    s.doubleTapKeys = ReadString(L"pen", L"double_tap", s.doubleTapKeys);
+    s.pressureGamma = ReadInt(L"pen", L"pressure_gamma", s.pressureGamma);
+    s.tilt = ReadInt(L"pen", L"tilt", s.tilt);
+    s.invertTilt = ReadInt(L"pen", L"invert_tilt", s.invertTilt);
     return s;
 }
 
@@ -46,4 +52,10 @@ void SaveSettings(const Settings& s) {
     Write(L"audio", L"discord_volume", s.discordVolume);
     Write(L"audio", L"asio_dsp_buffer", s.asioDspBuffer);
     Write(L"video", L"rotation", s.rotation);
+    Write(L"pen", L"monitor", s.penMonitor);
+    Write(L"pen", L"squeeze", s.squeezeKeys);
+    Write(L"pen", L"double_tap", s.doubleTapKeys);
+    Write(L"pen", L"pressure_gamma", s.pressureGamma);
+    Write(L"pen", L"tilt", s.tilt);
+    Write(L"pen", L"invert_tilt", s.invertTilt);
 }

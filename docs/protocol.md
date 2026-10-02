@@ -9,6 +9,7 @@ Wi-Fi는 iPad IP로 바로 연결한다. Bonjour 서비스 타입은 `_padlink._
 | 47800 | 아래 프레임 프로토콜 |
 | 47801 | 디버그: 헤더 없는 H.264 Annex-B (`ffplay -f h264`) |
 | 47802 | 디버그: 스트리밍 WAV 헤더 + s16le (`ffplay -f wav`) |
+| 47810 | 펜 모드 (앱이 화면에 떠 있을 때). 같은 프레임 프로토콜, 양방향 |
 
 ## 프레임
 
@@ -28,6 +29,9 @@ Wi-Fi는 iPad IP로 바로 연결한다. Bonjour 서비스 타입은 `_padlink._
 | 2 | videoFrame | H.264 Annex-B 액세스 유닛. 키프레임이면 SPS/PPS 포함. flags bit0 = 키프레임, bit4–7 = CGImagePropertyOrientation(1~8) |
 | 3 | audioPCM | sampleRate u32, channels u8(=2), bits u8(=16), reserved u16, 이후 s16le 인터리브 |
 | 4 | log | UTF-8 한 줄 |
+| 16 | penSamples | count u16, reserved u16, 이후 샘플 × count. 샘플 32바이트: phase u8(0 호버, 1 닿음, 2 이동, 3 뗌, 4 호버 끝, 5 취소), flags u8, reserved u16, x, y, pressure, altitude, azimuth, roll, z (모두 f32). x·y는 활성 영역 기준 0~1, 각도는 라디안(UIKit 기준: azimuth 0 = 오른쪽, 시계 방향 +) |
+| 17 | penButton | button u8(1 스퀴즈, 2 더블탭), phase u8(0 시작, 1 끝, 2 한 번), reserved u16 |
+| 32 | penConfig | PC → iPad. JSON `{"width","height"}` — 펜이 움직일 PC 화면 크기. iPad는 이 비율로 활성 영역을 잡는다 |
 
 - 접속 직후 영상은 키프레임부터 온다. 화면이 멈춰 있어도 0.2초 안에 마지막 화면으로 키프레임을 만든다.
 - 네트워크가 밀리면(4MB 초과) 영상은 다음 키프레임까지 건너뛰고, 소리는 그 조각을 버린다.

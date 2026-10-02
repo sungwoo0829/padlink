@@ -6,6 +6,7 @@
 #include "audio.h"
 #include "log.h"
 #include "net.h"
+#include "pen.h"
 #include "settings.h"
 #include "video.h"
 
@@ -26,6 +27,7 @@ enum ControlId : int {
     ID_DISC,
     ID_DISC_BUF,
     ID_DISC_VOL,
+    ID_PEN_MON,
     ID_APPLY,
     ID_SHOW_VIDEO,
     ID_ROTATE,
@@ -39,11 +41,17 @@ HFONT g_font;
 float g_scale = 1.0f;
 
 Settings g_settings;
-Receiver g_receiver;
+Receiver g_receiver;  // 화면 방송 (47800)
+Receiver g_penLink;   // 펜 모드 (47810)
 VideoPipeline g_videoPipe;
 AudioEngine g_audio;
+PenInjector g_pen;
 bool g_videoOk = false;
+bool g_penOk = false;
+std::vector<MonitorInfo> g_monitors;
 std::wstring g_linkStatus = L"연결 안 함";
+std::wstring g_penStatus = L"연결 안 함";
+uint64_t g_lastPenSamples = 0;
 uint64_t g_lastBytes = 0;
 uint64_t g_lastFrames = 0;
 ULONGLONG g_lastTick = 0;
@@ -132,6 +140,53 @@ void ReadUi() {
     g_settings.discordVolume = ItemInt(ID_DISC_VOL, g_settings.discordVolume);
 }
 
+std::wstring MonitorLabel(const MonitorInfo& m) {
+    std::wstring name = m.device;
+    if (name.rfind(L"\\\\.\\", 0) == 0) name = name.substr(4);
+    return Format(L"%ls · %ldx%ld%ls", name.c_str(), m.rect.right - m.rect.left, m.rect.bottom - m.rect.top,
+                  m.primary ? L" · 주 모니터" : L"");
+}
+
+void FillMonitors() {
+    g_monitors = ListMonitors();
+    HWND combo = Item(ID_PEN_MON);
+    SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+    int pick = -1;
+    for (size_t i = 0; i < g_monitors.size(); ++i) {
+        SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(MonitorLabel(g_monitors[i]).c_str()));
+        if (g_monitors[i].device == g_settings.penMonitor) pick = int(i);
+        if (pick < 0 && g_settings.penMonitor.empty() && g_monitors[i].primary) pick = int(i);
+    }
+    if (pick < 0 && !g_monitors.empty()) pick = 0;
+    SendMessageW(combo, CB_SETCURSEL, pick, 0);
+}
+
+void SendPenConfig() {
+    RECT r = g_pen.Target();
+    std::string json = "{\"width\":" + std::to_string(r.right - r.left) + ",\"height\":" +
+                       std::to_string(r.bottom - r.top) + "}";
+    g_penLink.Send(wire::kPenConfig, json);
+}
+
+void ApplyPen() {
+    if (!g_penOk) return;
+    int sel = (int)SendMessageW(Item(ID_PEN_MON), CB_GETCURSEL, 0, 0);
+    PenMapping m;
+    if (sel >= 0 && sel < (int)g_monitors.size()) {
+        m.target = g_monitors[size_t(sel)].rect;
+        g_settings.penMonitor = g_monitors[size_t(sel)].device;
+    } else {
+        m.target = RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+    m.squeezeKeys = g_settings.squeezeKeys;
+    m.doubleTapKeys = g_settings.doubleTapKeys;
+    m.pressureGamma = g_settings.pressureGamma;
+    m.tilt = g_settings.tilt != 0;
+    m.invertTilt = g_settings.invertTilt != 0;
+    g_pen.Configure(m);
+    if (g_penLink.connected) SendPenConfig();
+}
+
 void ApplyAudio() {
     if (!g_audio.Loaded()) return;
     AudioConfig c;
@@ -149,8 +204,11 @@ void ToggleConnect() {
     if (g_receiver.Running()) {
         if (!g_lastStatus.empty()) Log(L"마지막 상태: " + g_lastStatus);
         g_receiver.Stop();
+        g_penLink.Stop();
+        g_pen.Reset();
         SetWindowTextW(Item(ID_CONNECT), L"연결");
         g_linkStatus = L"연결 안 함";
+        g_penStatus = L"연결 안 함";
         Log(L"연결 중지");
         return;
     }
@@ -165,9 +223,22 @@ void ToggleConnect() {
         auto* copy = new std::wstring(status);
         if (!PostMessageW(g_main, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(copy))) delete copy;
     };
-    g_receiver.Start(g_settings.mode == 1 ? LinkMode::Wifi : LinkMode::Usb, g_settings.ip, cb);
+    LinkMode mode = g_settings.mode == 1 ? LinkMode::Wifi : LinkMode::Usb;
+    g_receiver.Start(mode, g_settings.ip, wire::kPort, L"방송", L"iPad에서 PadLink 방송을 시작하세요", cb);
+
+    ReceiverCallbacks pen;
+    pen.onPenSamples = [](const uint8_t* data, size_t len) { g_pen.OnSamples(data, len); };
+    pen.onPenButton = [](uint8_t button, uint8_t phase) { g_pen.OnButton(button, phase); };
+    pen.onConnected = [] { SendPenConfig(); };
+    pen.onDisconnected = [] { g_pen.Reset(); };
+    pen.onStatus = [](const std::wstring& status) {
+        auto* copy = new std::wstring(status);
+        if (!PostMessageW(g_main, WM_APP_STATUS, 1, reinterpret_cast<LPARAM>(copy))) delete copy;
+    };
+    if (g_penOk) g_penLink.Start(mode, g_settings.ip, wire::kPenPort, L"펜", L"iPad PadLink 앱에서 펜 모드를 여세요", pen);
     SetWindowTextW(Item(ID_CONNECT), L"끊기");
     g_linkStatus = L"연결 중…";
+    g_penStatus = g_penOk ? L"연결 중…" : L"펜 입력을 쓸 수 없음 (로그 참고)";
     ShowWindow(g_video, SW_SHOWNOACTIVATE);
 }
 
@@ -193,6 +264,11 @@ void UpdateStatus() {
         line1 += Format(L" · 영상 %dx%d %.0ffps %.1fMbps", g_videoPipe.width.load(), g_videoPipe.height.load(), fps,
                         mbps);
     }
+    uint64_t penSamples = g_pen.samples.load();
+    double penRate = dt > 0 ? (penSamples - g_lastPenSamples) / dt : 0;
+    g_lastPenSamples = penSamples;
+    std::wstring penLine = L"펜: " + g_penStatus;
+    if (g_penLink.connected) penLine += Format(L" · %.0f샘플/s · 버튼 %llu회", penRate, g_pen.buttons.load());
     std::wstring line2, line3;
     if (g_audio.Loaded()) {
         AudioStats a = g_audio.Stats();
@@ -202,9 +278,9 @@ void UpdateStatus() {
     } else {
         line2 = L"소리 꺼짐 — fmod.dll 필요 (로그 참고)";
     }
-    SetWindowTextW(Item(ID_STATUS), (line1 + L"\r\n" + line2 + L"\r\n" + line3).c_str());
+    SetWindowTextW(Item(ID_STATUS), (line1 + L"\r\n" + penLine + L"\r\n" + line2 + L"\r\n" + line3).c_str());
     // 원격으로 상태를 볼 수 있게 연결 중에는 1분마다 로그에도 남긴다
-    g_lastStatus = line1 + L" | " + line2 + L" | " + line3;
+    g_lastStatus = line1 + L" | " + penLine + L" | " + line2 + L" | " + line3;
     if (g_receiver.connected && ++g_statusTicks % 60 == 0) Log(L"상태: " + g_lastStatus);
 }
 
@@ -218,9 +294,9 @@ void CreateControls() {
     SendMessageW(Item(g_settings.mode == 1 ? ID_WIFI : ID_USB), BM_SETCHECK, BST_CHECKED, 0);
 
     y += 36;
-    Control(L"STATIC", L"", SS_LEFT, 12, y, 700, 58, ID_STATUS);
+    Control(L"STATIC", L"", SS_LEFT, 12, y, 700, 76, ID_STATUS);
 
-    y += 66;
+    y += 84;
     Control(L"STATIC", L"내 모니터링 (ASIO)", SS_LEFT, 12, y + 4, 150, 20, -1);
     Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 166, y, 300, 300, ID_ASIO);
     Control(L"STATIC", L"버퍼ms", SS_RIGHT, 470, y + 4, 56, 20, -1);
@@ -241,9 +317,15 @@ void CreateControls() {
             ID_DISC_VOL, WS_EX_CLIENTEDGE);
 
     y += 34;
+    Control(L"STATIC", L"펜 → 모니터", SS_LEFT, 12, y + 4, 150, 20, -1);
+    Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 166, y, 300, 300, ID_PEN_MON);
+    Control(L"STATIC", L"스퀴즈 = Space(손 도구) · 더블탭 = E/P(지우개↔펜) — ini에서 변경", SS_LEFT, 474, y + 4, 238, 40,
+            -1);
+
+    y += 40;
     Control(L"STATIC",
-            L"디스코드에서는 'PadLink 화면' 창을 공유하세요. 디스코드용 출력은 내가 듣지 않는 장치(VB-CABLE, 디지털 출력 등)로 "
-            L"고르고, 볼륨 믹서에서 이 앱을 음소거하지 마세요(디스코드도 무음이 됨).",
+            L"디스코드에서는 'PadLink 화면' 창을 공유하세요. 디스코드용 출력은 내가 듣지 않는 장치로 고르고, 볼륨 믹서에서 "
+            L"이 앱을 음소거하지 마세요. 클립 스튜디오는 [파일 > 환경 설정 > 태블릿]을 TabletPC로.",
             SS_LEFT, 12, y, 700, 40, -1);
 
     y += 46;
@@ -296,8 +378,18 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_settings.rotation = g_videoPipe.RotateUser();
             SaveSettings(g_settings);
             return 0;
+        case ID_PEN_MON:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                ApplyPen();
+                SaveSettings(g_settings);
+            }
+            return 0;
         }
         break;
+    case WM_DISPLAYCHANGE:
+        FillMonitors();
+        ApplyPen();
+        return 0;
     case WM_TIMER:
         if (wp == kStatsTimer) UpdateStatus();
         return 0;
@@ -308,7 +400,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_APP_STATUS: {
         std::unique_ptr<std::wstring> status(reinterpret_cast<std::wstring*>(lp));
-        if (g_receiver.Running()) g_linkStatus = *status;
+        if (g_receiver.Running()) (wp == 1 ? g_penStatus : g_linkStatus) = *status;
         return 0;
     }
     case WM_CTLCOLORSTATIC:
@@ -324,6 +416,8 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ReadUi();
         SaveSettings(g_settings);
         g_receiver.Stop();
+        g_penLink.Stop();
+        g_pen.Reset();
         g_audio.Stop();
         g_videoPipe.Stop();
         PostQuitMessage(0);
@@ -395,7 +489,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&vc);
 
     DWORD mainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(724), S(568)};
+    RECT rc{0, 0, S(724), S(626)};
     AdjustWindowRect(&rc, mainStyle, FALSE);
     g_main = CreateWindowExW(0, L"PadLinkMain", L"PadLink 수신", mainStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                              rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
@@ -409,6 +503,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     g_video = CreateWindowExW(0, L"PadLinkVideo", L"PadLink 화면", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                               vr.right - vr.left, vr.bottom - vr.top, nullptr, nullptr, instance, nullptr);
     g_videoOk = g_videoPipe.Start(g_video, g_settings.rotation);
+
+    std::wstring penError;
+    g_penOk = g_pen.Init(penError);
+    if (!g_penOk) Log(penError);
+    FillMonitors();
+    ApplyPen();
 
     InitAudioUi();
     ShowWindow(g_main, show);

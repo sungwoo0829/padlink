@@ -16,9 +16,12 @@ add_executable(PadLinkRecv WIN32
   src/net.cpp
   src/video.cpp
   src/audio.cpp
+  src/pen.cpp
   src/app.manifest
 )
-target_compile_definitions(PadLinkRecv PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+target_compile_definitions(PadLinkRecv PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
+  # 합성 펜(InjectSyntheticPointerInput)은 Windows 10 1809(RS5) API
+  NTDDI_VERSION=0x0A000006)
 target_compile_options(PadLinkRecv PRIVATE /utf-8 /W4 /permissive- /EHsc)
 target_link_libraries(PadLinkRecv PRIVATE
   ws2_32 d3d11 dxgi mfplat mfuuid wmcodecdspuuid strmiids comctl32 ole32 winmm)

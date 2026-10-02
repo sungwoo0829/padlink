@@ -16,8 +16,17 @@
 
 // iPad와 주고받는 프레임 형식 (docs/protocol.md)
 namespace wire {
-constexpr uint16_t kPort = 47800;
-enum Kind : uint8_t { kHello = 0, kVideoFrame = 2, kAudioPCM = 3, kLog = 4 };
+constexpr uint16_t kPort = 47800;     // 화면 방송 확장
+constexpr uint16_t kPenPort = 47810;  // 앱 펜 모드
+enum Kind : uint8_t {
+    kHello = 0,
+    kVideoFrame = 2,
+    kAudioPCM = 3,
+    kLog = 4,
+    kPenSamples = 16,
+    kPenButton = 17,
+    kPenConfig = 32,  // PC → iPad
+};
 #pragma pack(push, 1)
 struct Header {
     uint8_t kind;

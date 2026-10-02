@@ -7,10 +7,14 @@
 #include "log.h"
 #include "usbmux.h"
 
-void Receiver::Start(LinkMode mode, std::wstring ip, ReceiverCallbacks callbacks) {
+void Receiver::Start(LinkMode mode, std::wstring ip, uint16_t port, std::wstring label, std::wstring waitHint,
+                     ReceiverCallbacks callbacks) {
     Stop();
     mode_ = mode;
     ip_ = std::move(ip);
+    port_ = port;
+    label_ = std::move(label);
+    waitHint_ = std::move(waitHint);
     cb_ = std::move(callbacks);
     stop_ = false;
     thread_ = std::thread([this] { Loop(); });
@@ -26,6 +30,13 @@ void Receiver::Stop() {
     if (thread_.joinable()) thread_.join();
 }
 
+bool Receiver::Send(uint8_t kind, const std::string& payload) {
+    std::lock_guard lock(socketMutex_);
+    if (socket_ == INVALID_SOCKET) return false;
+    wire::Header h{kind, 0, 0, uint32_t(payload.size()), 0};
+    return SendAll(socket_, &h, sizeof(h)) && (payload.empty() || SendAll(socket_, payload.data(), payload.size()));
+}
+
 void Receiver::Loop() {
     std::wstring lastWhy;
     while (!stop_) {
@@ -33,7 +44,7 @@ void Receiver::Loop() {
         SOCKET s = Open(why);
         if (s == INVALID_SOCKET) {
             if (why != lastWhy) {
-                Log(why);
+                Log(label_ + L": " + why);
                 cb_.onStatus(why);
                 lastWhy = why;
             }
@@ -57,17 +68,19 @@ void Receiver::Loop() {
 
         std::wstring how = mode_ == LinkMode::Usb ? L"USB" : L"Wi-Fi";
         connected = true;
-        Log(how + L"로 iPad에 연결됨");
+        Log(label_ + L": " + how + L"로 iPad에 연결됨");
         cb_.onStatus(how + L" 연결됨");
+        if (cb_.onConnected) cb_.onConnected();
         ReadLoop(s);
         connected = false;
+        if (cb_.onDisconnected) cb_.onDisconnected();
         {
             std::lock_guard lock(socketMutex_);
             socket_ = INVALID_SOCKET;
         }
         closesocket(s);
         if (!stop_) {
-            Log(L"연결 끊김, 다시 연결 중");
+            Log(label_ + L": 연결 끊김, 다시 연결 중");
             cb_.onStatus(L"연결 끊김, 다시 연결 중…");
         }
     }
@@ -81,7 +94,7 @@ SOCKET Receiver::OpenWifi(std::wstring& why) {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
     addrinfoW* result = nullptr;
-    std::wstring port = std::to_wstring(wire::kPort);
+    std::wstring port = std::to_wstring(port_);
     if (GetAddrInfoW(ip_.c_str(), port.c_str(), &hints, &result) != 0 || !result) {
         why = L"IP 주소를 해석할 수 없음: " + ip_;
         return INVALID_SOCKET;
@@ -107,7 +120,7 @@ SOCKET Receiver::OpenWifi(std::wstring& why) {
     if (ready <= 0 || FD_ISSET(s, &failed)) {
         closesocket(s);
         why = ready == 0 ? L"Wi-Fi: " + ip_ + L" 응답 없음 (같은 네트워크인지 확인)"
-                         : L"Wi-Fi: " + ip_ + L" 연결 거부 — iPad에서 PadLink 방송을 시작하세요";
+                         : L"Wi-Fi: " + ip_ + L" 연결 거부 — " + waitHint_;
         return INVALID_SOCKET;
     }
     nonBlocking = 0;
@@ -125,8 +138,8 @@ SOCKET Receiver::OpenUsb(std::wstring& why) {
         return INVALID_SOCKET;
     }
     int result = -1;
-    SOCKET s = UsbmuxConnect(it->id, wire::kPort, result, why);
-    if (s == INVALID_SOCKET && result == 3) why = L"USB: iPad 연결됨 — PadLink 방송을 시작하세요";
+    SOCKET s = UsbmuxConnect(it->id, port_, result, why);
+    if (s == INVALID_SOCKET && result == 3) why = L"USB: iPad 연결됨 — " + waitHint_;
     return s;
 }
 
@@ -145,7 +158,13 @@ void Receiver::ReadLoop(SOCKET s) {
 
         switch (h.kind) {
         case wire::kHello:
-            Log(L"iPad 인사: " + Widen(std::string(payload.begin(), payload.end())));
+            Log(label_ + L": iPad 인사 " + Widen(std::string(payload.begin(), payload.end())));
+            break;
+        case wire::kPenSamples:
+            if (cb_.onPenSamples) cb_.onPenSamples(payload.data(), payload.size());
+            break;
+        case wire::kPenButton:
+            if (h.length >= 2 && cb_.onPenButton) cb_.onPenButton(payload[0], payload[1]);
             break;
         case wire::kVideoFrame:
             ++videoFrames;
@@ -161,7 +180,7 @@ void Receiver::ReadLoop(SOCKET s) {
             }
             break;
         case wire::kLog:
-            Log(L"[iPad] " + Widen(std::string(payload.begin(), payload.end())));
+            Log(L"[iPad " + label_ + L"] " + Widen(std::string(payload.begin(), payload.end())));
             break;
         default:
             break;

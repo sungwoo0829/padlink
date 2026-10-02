@@ -13,6 +13,13 @@ struct Settings {
     int discordVolume = 100;
     int asioDspBuffer = 256;
     int rotation = 0;  // 사용자가 추가로 돌린 90도 단위 횟수
+
+    std::wstring penMonitor;              // \\.\DISPLAY1 형식, 비어 있으면 주 모니터
+    std::wstring squeezeKeys = L"SPACE";  // 클립 스튜디오: 누르는 동안 손 도구
+    std::wstring doubleTapKeys = L"E,P";  // 클립 스튜디오: 지우개 ↔ 펜
+    int pressureGamma = 100;
+    int tilt = 1;
+    int invertTilt = 0;
 };
 
 Settings LoadSettings();
