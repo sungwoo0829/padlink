@@ -18,6 +18,7 @@ add_executable(PadLinkRecv WIN32
   src/audio.cpp
   src/pen.cpp
   src/screen.cpp
+  src/vdd.cpp
   src/app.manifest
 )
 target_compile_definitions(PadLinkRecv PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00
@@ -32,4 +33,4 @@ if(NOT EXISTS "${NVCODEC_INCLUDE_DIR}/nvEncodeAPI.h")
 endif()
 target_include_directories(PadLinkRecv PRIVATE "${NVCODEC_INCLUDE_DIR}")
 target_link_libraries(PadLinkRecv PRIVATE
-  ws2_32 d3d11 dxgi mfplat mfuuid wmcodecdspuuid strmiids comctl32 ole32 winmm)
+  ws2_32 d3d11 dxgi mfplat mfuuid wmcodecdspuuid strmiids comctl32 ole32 winmm cfgmgr32)

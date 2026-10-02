@@ -18,6 +18,7 @@ struct MonitorInfo {
     std::wstring device;  // \\.\DISPLAY1
     RECT rect{};
     bool primary = false;
+    bool vdd = false;  // Virtual Display Driver 가상 모니터
 };
 std::vector<MonitorInfo> ListMonitors();
 

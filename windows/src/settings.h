@@ -24,6 +24,8 @@ struct Settings {
     int display = 0;  // 1 = 펜 모니터 화면을 iPad로 보냄 (액정타블렛)
     int displayBitrateMbps = 40;
     int displayFps = 60;
+    int vddCount = 1;  // 가상 모니터를 켤 때 개수
+    int vddOwned = 0;  // PadLink가 켠 VDD가 아직 켜져 있음 (비정상 종료 뒤 정리용)
 };
 
 Settings LoadSettings();

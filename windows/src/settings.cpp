@@ -41,6 +41,8 @@ Settings LoadSettings() {
     s.display = ReadInt(L"display", L"enabled", s.display);
     s.displayBitrateMbps = ReadInt(L"display", L"bitrate_mbps", s.displayBitrateMbps);
     s.displayFps = ReadInt(L"display", L"fps", s.displayFps);
+    s.vddCount = ReadInt(L"display", L"vdd_count", s.vddCount);
+    s.vddOwned = ReadInt(L"display", L"vdd_owned", s.vddOwned);
     return s;
 }
 
@@ -64,4 +66,6 @@ void SaveSettings(const Settings& s) {
     Write(L"display", L"enabled", s.display);
     Write(L"display", L"bitrate_mbps", s.displayBitrateMbps);
     Write(L"display", L"fps", s.displayFps);
+    Write(L"display", L"vdd_count", s.vddCount);
+    Write(L"display", L"vdd_owned", s.vddOwned);
 }
