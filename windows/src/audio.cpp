@@ -1,6 +1,7 @@
 #include "audio.h"
 
 #include <mmsystem.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <cstring>
