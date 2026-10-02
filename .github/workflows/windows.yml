@@ -1,0 +1,44 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+    paths: ["windows/**", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S windows -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release -- /m /v:minimal
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp build/Release/PadLinkRecv.exe dist/
+          cp windows/README-windows.txt dist/
+          cd dist && 7z a -tzip ../PadLinkRecv-win64.zip . > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PadLinkRecv-win64
+          path: PadLinkRecv-win64.zip
+
+      - name: Publish win-nightly release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete win-nightly --yes --cleanup-tag || true
+          gh release create win-nightly PadLinkRecv-win64.zip --prerelease \
+            --title "Windows nightly" --notes "커밋 ${GITHUB_SHA::7}" --target "$GITHUB_SHA"
