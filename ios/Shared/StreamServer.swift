@@ -188,7 +188,8 @@ final class StreamServer {
         while client.inbox.count >= Wire.headerSize {
             let header = [UInt8](client.inbox.prefix(Wire.headerSize))
             let length = Int(header[4]) | Int(header[5]) << 8 | Int(header[6]) << 16 | Int(header[7]) << 24
-            guard length <= 1 << 20 else {
+            // PC 화면 키프레임이 들어오므로 넉넉하게
+            guard length <= 16 << 20 else {
                 client.connection.cancel()
                 return
             }

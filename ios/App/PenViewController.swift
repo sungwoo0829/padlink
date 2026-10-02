@@ -1,10 +1,13 @@
 import UIKit
 
-/// 펜 모드(판타블렛): Apple Pencil 입력을 PC로 보낸다. 화면은 PC 모니터를 보면서 쓴다.
-/// PC 모니터 비율에 맞춘 활성 영역만 쓰고, 손가락 터치는 무시한다(손바닥 인식 차단).
+/// 펜 모드: Apple Pencil 입력을 PC로 보낸다. PC 모니터 비율에 맞춘 활성 영역만 쓰고,
+/// 손가락 터치는 무시한다(손바닥 인식 차단). PC가 화면을 보내 주면 그 영역에 띄워서
+/// 액정타블렛이 되고, 안 보내면 PC 모니터를 보면서 쓰는 판타블렛이다.
 final class PenViewController: UIViewController, UIPencilInteractionDelegate {
     private let server = StreamServer(port: Wire.penPort, name: "pen", bonjourName: "PadLink Pen")
     private let canvas = PenCanvasView()
+    private let video = VideoReceiver()
+    private var wasConnected = false
     private let statusLabel = UILabel()
     private let closeButton = UIButton(type: .system)
     private var statusTimer: Timer?
@@ -21,6 +24,10 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         canvas.onSamples = { [weak self] samples in self?.send(samples) }
+        canvas.attachVideo(video.layer)
+        video.onNeedKeyframe = { [server] in
+            server.sendAll(Wire.frame(.keyframeRequest, pts: 0, payload: Data()))
+        }
 
         let pencil = UIPencilInteraction()
         pencil.delegate = self
@@ -46,9 +53,15 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
         ])
 
         server.makeGreeting = { Wire.frame(.hello, pts: 0, payload: Wire.helloPayload(role: "pen")) }
-        server.onFrame = { [weak self] kind, payload in
-            guard kind == Wire.Kind.penConfig.rawValue else { return }
-            DispatchQueue.main.async { self?.applyConfig(payload) }
+        server.onFrame = { [weak self, video] kind, payload in
+            switch kind {
+            case Wire.Kind.videoFrame.rawValue:
+                video.submit(payload)
+            case Wire.Kind.penConfig.rawValue:
+                DispatchQueue.main.async { self?.applyConfig(payload) }
+            default:
+                break
+            }
         }
     }
 
@@ -70,6 +83,7 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
         statusTimer?.invalidate()
         statusTimer = nil
         server.stop()
+        video.clear()
         Log.sink = nil
         UIApplication.shared.isIdleTimerDisabled = false
     }
@@ -79,8 +93,13 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
     }
 
     private func updateStatus() {
-        if server.hasClients {
-            statusLabel.text = "PC 연결됨 · \(targetName) — PC 화면을 보면서 그리세요"
+        let connected = server.hasClients
+        if wasConnected && !connected { video.clear() }
+        wasConnected = connected
+        if connected {
+            statusLabel.text = video.isReceiving
+                ? "PC 연결됨 · \(targetName) · 액정타블렛"
+                : "PC 연결됨 · \(targetName) — PC 화면을 보면서 그리세요 (PC에서 화면 보내기를 켜면 액정타블렛)"
         } else {
             let ip = NetInfo.ipv4Addresses().first.map { " · Wi-Fi \($0)" } ?? ""
             statusLabel.text = "PC 연결 대기 중 (USB\(ip), 포트 \(Wire.penPort))"
@@ -132,6 +151,7 @@ final class PenCanvasView: UIView {
     }
 
     private var activeArea = CGRect.zero
+    private var videoLayer: CALayer?
     private let areaLayer = CAShapeLayer()
     private let cursorLayer = CAShapeLayer()
 
@@ -156,6 +176,13 @@ final class PenCanvasView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// PC 화면을 펜 영역에 겹쳐 띄운다 (펜 좌표와 1:1)
+    func attachVideo(_ video: CALayer) {
+        videoLayer = video
+        layer.insertSublayer(video, above: areaLayer)
+        setNeedsLayout()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         // 위쪽은 닫기 버튼과 상태 줄 자리
@@ -170,6 +197,7 @@ final class PenCanvasView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         areaLayer.path = UIBezierPath(rect: activeArea).cgPath
+        videoLayer?.frame = activeArea
         CATransaction.commit()
     }
 

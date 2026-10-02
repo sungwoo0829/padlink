@@ -31,6 +31,8 @@ enum Wire {
         case penButton = 17
         /// PC → iPad: JSON {"width","height","name"} — 펜이 움직일 PC 화면 크기
         case penConfig = 32
+        /// iPad → PC: 화면 디코딩을 이어가려면 키프레임이 필요함 (액정타블렛 모드)
+        case keyframeRequest = 33
     }
 
     enum PenPhase: UInt8 {
