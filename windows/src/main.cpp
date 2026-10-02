@@ -342,8 +342,8 @@ std::wstring OutputLine(const wchar_t* label, const AudioOutputStats& s) {
                   s.fillMs, s.correctionPct, s.drained, s.late, s.skips);
 }
 
-// 가상 모니터(VDD)는 iPad 펜 모드가 연결돼 화면을 보낼 때만 켠다.
-// 끊기고 10초가 지나면(잠깐 끊긴 건 무시) PadLink가 켠 것만 다시 끈다.
+// 가상 모니터(VDD)는 iPad 펜 모드가 연결돼 화면을 보낼 때만 켠다. 끊기고 10초가 지나면
+// (잠깐 끊긴 건 무시) 끈다. 끄는 건 '자동'을 골랐을 때와 PadLink가 켠 게 남아 있을 때뿐이다.
 void VddTick() {
     if (!g_vddInstalled) return;
     ULONGLONG now = GetTickCount64();
@@ -374,7 +374,8 @@ void VddTick() {
         if (g_settings.vddOwned && now - g_vddOnRequestedAt > 20000) SetVddOwned(false);
         return;
     }
-    if (!g_settings.vddOwned) return;  // 사용자가 직접 켠 VDD는 건드리지 않는다
+    // 다른 모니터를 골랐으면 사용자가 직접 켠 VDD는 건드리지 않는다
+    if (g_settings.penMonitor != kVddChoice && !g_settings.vddOwned) return;
     if (!g_vddUnneededSince) {
         g_vddUnneededSince = now;
     } else if (now - g_vddUnneededSince > 10000) {
@@ -597,7 +598,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         KillTimer(hwnd, kStatsTimer);
         g_screen.Stop();
-        if (g_settings.vddOwned && CurrentVdd()) {
+        if ((g_settings.vddOwned || g_settings.penMonitor == kVddChoice) && CurrentVdd()) {
             std::wstring error;
             if (VddSetDisplayCount(0, error)) Log(L"VDD: 종료하면서 가상 모니터를 끔");
             else Log(L"VDD: " + error);

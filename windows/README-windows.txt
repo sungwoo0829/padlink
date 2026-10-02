@@ -45,7 +45,7 @@ PadLink 수신 (Windows)
 2. 수신 앱 "펜 → 모니터"에서 "가상 모니터 (VDD) · 자동"을 고르고 "iPad에 화면 보내기"를 켭니다.
    가상 모니터는 iPad 펜 모드가 연결될 때 자동으로 켜지고, 끊긴 지 10초 뒤(또는 수신 앱을 끌 때) 꺼집니다.
    꺼지면 그 위에 있던 창은 Windows가 다른 모니터로 옮깁니다. 관리자 권한은 필요 없습니다.
-   (PadLink가 켠 것만 끕니다. VDD 제어 앱으로 직접 켠 가상 모니터는 건드리지 않습니다.)
+   '자동'을 고르면 VDD는 PadLink가 관리합니다. 다른 모니터를 고르면 VDD는 건드리지 않습니다.
    켤 때 개수: PadLinkRecv.ini [display] vdd_count=1
 3. iPad에서 펜 모드를 열면 그 화면이 펜 영역에 뜨고, 펜 위치가 화면과 1:1로 맞습니다.
    설정: PadLinkRecv.ini [display] bitrate_mbps=40, fps=60
