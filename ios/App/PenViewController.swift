@@ -10,6 +10,11 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
     private var wasConnected = false
     private let statusLabel = UILabel()
     private let closeButton = UIButton(type: .system)
+    /// 화면 위에 겹치는 메뉴. 화면을 받는 중이면 잠시 뒤 숨고, 두 손가락 탭으로 다시 뜬다.
+    private let overlay = UIView()
+    private var overlayVisible = true
+    private var overlayShownAt: TimeInterval = 0
+    private var wasReceiving = false
     private var statusTimer: Timer?
     private var targetName = ""
 
@@ -33,24 +38,41 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
         pencil.delegate = self
         canvas.addInteraction(pencil)
 
+        // 메뉴 배경을 건드린 펜 입력은 응답자 체인을 따라 캔버스로 그대로 간다
+        overlay.backgroundColor = UIColor(white: 0, alpha: 0.6)
+        overlay.layer.cornerRadius = 10
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        canvas.addSubview(overlay)
+
         closeButton.setTitle("닫기", for: .normal)
         closeButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         closeButton.addTarget(self, action: #selector(close), for: .touchUpInside)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
-        canvas.addSubview(closeButton)
+        overlay.addSubview(closeButton)
 
-        statusLabel.textColor = UIColor(white: 0.62, alpha: 1)
+        statusLabel.textColor = UIColor(white: 0.75, alpha: 1)
         statusLabel.font = .systemFont(ofSize: 13)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        canvas.addSubview(statusLabel)
+        overlay.addSubview(statusLabel)
 
         NSLayoutConstraint.activate([
-            closeButton.topAnchor.constraint(equalTo: canvas.safeAreaLayoutGuide.topAnchor, constant: 2),
-            closeButton.leadingAnchor.constraint(equalTo: canvas.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            overlay.topAnchor.constraint(equalTo: canvas.safeAreaLayoutGuide.topAnchor, constant: 8),
+            overlay.leadingAnchor.constraint(equalTo: canvas.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            overlay.trailingAnchor.constraint(lessThanOrEqualTo: canvas.trailingAnchor, constant: -8),
+            closeButton.topAnchor.constraint(equalTo: overlay.topAnchor, constant: 2),
+            closeButton.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -2),
+            closeButton.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 14),
             statusLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 20),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: canvas.trailingAnchor, constant: -16),
+            statusLabel.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 16),
+            statusLabel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -14),
         ])
+
+        // 손바닥에 실수로 뜨지 않게 두 손가락 탭만 받는다 (Pencil은 무시)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(showOverlay))
+        tap.numberOfTouchesRequired = 2
+        tap.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        tap.cancelsTouchesInView = false
+        canvas.addGestureRecognizer(tap)
 
         server.makeGreeting = { Wire.frame(.hello, pts: 0, payload: Wire.helloPayload(role: "pen")) }
         server.onFrame = { [weak self, video] kind, payload in
@@ -92,13 +114,43 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
         dismiss(animated: true)
     }
 
+    @objc private func showOverlay() {
+        overlayShownAt = ProcessInfo.processInfo.systemUptime
+        setOverlay(visible: true)
+    }
+
+    private func setOverlay(visible: Bool) {
+        guard visible != overlayVisible else { return }
+        overlayVisible = visible
+        if visible {
+            overlay.isHidden = false
+            UIView.animate(withDuration: 0.2) { self.overlay.alpha = 1 }
+        } else {
+            UIView.animate(withDuration: 0.3, animations: { self.overlay.alpha = 0 }) { _ in
+                if !self.overlayVisible { self.overlay.isHidden = true }
+            }
+        }
+    }
+
     private func updateStatus() {
         let connected = server.hasClients
         if wasConnected && !connected { video.clear() }
         wasConnected = connected
+
+        // 화면을 받는 동안만 메뉴를 숨긴다. 받기 시작하면 3초는 보여 준다.
+        let receiving = video.isReceiving
+        let now = ProcessInfo.processInfo.systemUptime
+        if receiving && !wasReceiving { overlayShownAt = now }
+        wasReceiving = receiving
+        if !receiving {
+            setOverlay(visible: true)
+        } else if overlayVisible && now - overlayShownAt > 3 {
+            setOverlay(visible: false)
+        }
+
         if connected {
-            statusLabel.text = video.isReceiving
-                ? "PC 연결됨 · \(targetName) · 액정타블렛"
+            statusLabel.text = receiving
+                ? "PC 연결됨 · \(targetName) · 액정타블렛 · 두 손가락 탭: 메뉴"
                 : "PC 연결됨 · \(targetName) — PC 화면을 보면서 그리세요 (PC에서 화면 보내기를 켜면 액정타블렛)"
         } else {
             let ip = NetInfo.ipv4Addresses().first.map { " · Wi-Fi \($0)" } ?? ""
@@ -185,8 +237,8 @@ final class PenCanvasView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // 위쪽은 닫기 버튼과 상태 줄 자리
-        let room = bounds.inset(by: UIEdgeInsets(top: safeAreaInsets.top + 44, left: 12, bottom: 12, right: 12))
+        // 화면 끝까지 쓴다. PC 화면 비율이 iPad와 같으면(2360x1640) 꽉 차고, 다르면 남는 쪽이 검게 남는다.
+        let room = bounds
         var w = room.width
         var h = w / targetAspect
         if h > room.height {
