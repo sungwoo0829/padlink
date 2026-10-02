@@ -244,8 +244,8 @@ void ToggleConnect() {
 
 std::wstring OutputLine(const wchar_t* label, const AudioOutputStats& s) {
     if (!s.active) return Format(L"%ls: %ls", label, s.error.empty() ? L"꺼짐" : s.error.c_str());
-    return Format(L"%ls: %ls · 버퍼 %.0fms · 보정 %+.2f%% · 끊김 %u · 건너뜀 %u", label, s.device.c_str(), s.fillMs,
-                  s.correctionPct, s.underruns, s.skips);
+    return Format(L"%ls: %ls · 버퍼 %.0fms · 보정 %+.2f%% · 모자람 %u · 늦음 %u · 건너뜀 %u", label, s.device.c_str(),
+                  s.fillMs, s.correctionPct, s.drained, s.late, s.skips);
 }
 
 void UpdateStatus() {
@@ -268,7 +268,13 @@ void UpdateStatus() {
     double penRate = dt > 0 ? (penSamples - g_lastPenSamples) / dt : 0;
     g_lastPenSamples = penSamples;
     std::wstring penLine = L"펜: " + g_penStatus;
-    if (g_penLink.connected) penLine += Format(L" · %.0f샘플/s · 버튼 %llu회", penRate, g_pen.buttons.load());
+    if (g_penLink.connected) {
+        PenStats p = g_pen.Live();
+        penLine += Format(L" · %.0f샘플/s · 버튼 %llu회", penRate, g_pen.buttons.load());
+        if (p.any)
+            penLine += Format(L" · 필압 %.2f · 기울기 X%+d° Y%+d° (세운 각 %.0f°) · 회전 %d°", p.pressure, p.tiltX, p.tiltY,
+                              p.altitudeDeg, p.rotation);
+    }
     std::wstring line2, line3;
     if (g_audio.Loaded()) {
         AudioStats a = g_audio.Stats();
@@ -281,7 +287,13 @@ void UpdateStatus() {
     SetWindowTextW(Item(ID_STATUS), (line1 + L"\r\n" + penLine + L"\r\n" + line2 + L"\r\n" + line3).c_str());
     // 원격으로 상태를 볼 수 있게 연결 중에는 1분마다 로그에도 남긴다
     g_lastStatus = line1 + L" | " + penLine + L" | " + line2 + L" | " + line3;
-    if (g_receiver.connected && ++g_statusTicks % 60 == 0) Log(L"상태: " + g_lastStatus);
+    if (g_receiver.connected && ++g_statusTicks % 60 == 0) {
+        Log(L"상태: " + g_lastStatus);
+        PenStats r = g_pen.TakeRange();
+        if (r.any)
+            Log(Format(L"펜 1분 범위: 필압 최대 %.2f · 기울기 X %+d~%+d° · Y %+d~%+d°", r.maxPressure, r.minTiltX,
+                       r.maxTiltX, r.minTiltY, r.maxTiltY));
+    }
 }
 
 void CreateControls() {

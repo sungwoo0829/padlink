@@ -23,7 +23,8 @@ struct AudioOutputStats {
     int deviceRate = 0;
     float fillMs = 0;
     float correctionPct = 0;
-    uint32_t underruns = 0;
+    uint32_t drained = 0;  // 받은 소리가 모자람 (버퍼가 짧거나 네트워크가 늦음)
+    uint32_t late = 0;     // 쓰기 스레드가 늦게 깨어남
     uint32_t skips = 0;
 };
 

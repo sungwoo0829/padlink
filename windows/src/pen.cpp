@@ -231,18 +231,39 @@ bool PenInjector::InjectLocked(POINTER_FLAGS flags, const Sample& s) {
     if (rollDeg < 0) rollDeg += 360.0;
     pen.rotation = UINT32(rollDeg) % 360;
 
+    // altitude: 0 = 눕힘, π/2 = 수직. azimuth: 펜 몸통이 기운 방향 (0 = 오른쪽, y는 아래가 +)
+    double tanAlt = std::tan(std::max(s.altitude, 0.02));
+    double tx = std::atan(std::cos(s.azimuth) / tanAlt) * 180.0 / kPi;
+    double ty = std::atan(std::sin(s.azimuth) / tanAlt) * 180.0 / kPi;
+    if (mapping_.invertTilt) {
+        tx = -tx;
+        ty = -ty;
+    }
+    INT32 tiltX = INT32(std::clamp(std::lround(tx), -90L, 90L));
+    INT32 tiltY = INT32(std::clamp(std::lround(ty), -90L, 90L));
     if (mapping_.tilt) {
-        // altitude: 0 = 눕힘, π/2 = 수직. azimuth: 펜 몸통이 기운 방향 (0 = 오른쪽, y는 아래가 +)
-        double tanAlt = std::tan(std::max(s.altitude, 0.02));
-        double tx = std::atan(std::cos(s.azimuth) / tanAlt) * 180.0 / kPi;
-        double ty = std::atan(std::sin(s.azimuth) / tanAlt) * 180.0 / kPi;
-        if (mapping_.invertTilt) {
-            tx = -tx;
-            ty = -ty;
-        }
         pen.penMask |= PEN_MASK_TILT_X | PEN_MASK_TILT_Y;
-        pen.tiltX = INT32(std::clamp(std::lround(tx), -90L, 90L));
-        pen.tiltY = INT32(std::clamp(std::lround(ty), -90L, 90L));
+        pen.tiltX = tiltX;
+        pen.tiltY = tiltY;
+    }
+
+    live_.any = true;
+    live_.pressure = contact ? pen.pressure / 1024.0 : 0;
+    live_.tiltX = tiltX;
+    live_.tiltY = tiltY;
+    live_.rotation = int(pen.rotation);
+    live_.altitudeDeg = s.altitude * 180.0 / kPi;
+    if (!range_.any) {
+        range_ = live_;
+        range_.minTiltX = range_.maxTiltX = tiltX;
+        range_.minTiltY = range_.maxTiltY = tiltY;
+        range_.maxPressure = live_.pressure;
+    } else {
+        range_.minTiltX = std::min(range_.minTiltX, int(tiltX));
+        range_.maxTiltX = std::max(range_.maxTiltX, int(tiltX));
+        range_.minTiltY = std::min(range_.minTiltY, int(tiltY));
+        range_.maxTiltY = std::max(range_.maxTiltY, int(tiltY));
+        range_.maxPressure = std::max(range_.maxPressure, live_.pressure);
     }
 
     if (!InjectSyntheticPointerInput(device_, &info, 1)) {
@@ -311,6 +332,18 @@ void PenInjector::ReleaseKeysLocked() {
     if (!squeezeHeld_) return;
     SendKeys(ParseCombo(heldKeys_), false);
     squeezeHeld_ = false;
+}
+
+PenStats PenInjector::Live() {
+    std::lock_guard lock(mutex_);
+    return live_;
+}
+
+PenStats PenInjector::TakeRange() {
+    std::lock_guard lock(mutex_);
+    PenStats r = range_;
+    range_ = PenStats{};
+    return r;
 }
 
 void PenInjector::Reset() {

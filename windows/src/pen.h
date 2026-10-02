@@ -21,6 +21,15 @@ struct MonitorInfo {
 };
 std::vector<MonitorInfo> ListMonitors();
 
+// 마지막으로 넣은 값과, 마지막 TakeRange 이후의 범위
+struct PenStats {
+    bool any = false;
+    double pressure = 0, maxPressure = 0;
+    int tiltX = 0, tiltY = 0, rotation = 0;
+    int minTiltX = 0, maxTiltX = 0, minTiltY = 0, maxTiltY = 0;
+    double altitudeDeg = 90;
+};
+
 // iPad Pencil 샘플 → Windows 합성 펜(InjectSyntheticPointerInput), 버튼 → 키보드
 class PenInjector {
 public:
@@ -31,6 +40,8 @@ public:
     void OnSamples(const uint8_t* data, size_t len);
     void OnButton(uint8_t button, uint8_t phase);
     void Reset();  // 연결이 끊기면 펜을 떼고 눌린 키를 놓는다
+    PenStats Live();
+    PenStats TakeRange();
 
     std::atomic<uint64_t> samples{0};
     std::atomic<uint64_t> buttons{0};
@@ -57,6 +68,8 @@ private:
     std::wstring heldKeys_;
     size_t doubleTapIndex_ = 0;
     bool warned_ = false;
+    PenStats live_;
+    PenStats range_;
 
     std::thread thread_;
     std::atomic<bool> stop_{false};

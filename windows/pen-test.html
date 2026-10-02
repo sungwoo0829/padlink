@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PadLink 펜 테스트</title>
+<style>
+  :root { --bg: #111418; --panel: #1b2027; --text: #e6e9ee; --muted: #8b95a3; --accent: #3fb6a8; --warn: #e0a43a; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.5 "Malgun Gothic", system-ui, sans-serif; overflow: hidden; }
+  canvas { position: fixed; inset: 0; touch-action: none; cursor: crosshair; }
+  #panel { position: fixed; top: 12px; left: 12px; padding: 12px 14px; background: var(--panel);
+    border-radius: 8px; min-width: 300px; pointer-events: none; }
+  #panel h1 { font-size: 15px; margin: 0 0 6px; }
+  #panel p { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 0; font-variant-numeric: tabular-nums; }
+  dt { color: var(--muted); }
+  dd { margin: 0; }
+  .ok { color: var(--accent); }
+  .warn { color: var(--warn); }
+  #clear { position: fixed; top: 12px; right: 12px; background: var(--panel); color: var(--text);
+    border: 1px solid #333b46; border-radius: 6px; padding: 6px 12px; font: inherit; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <h1>PadLink 펜 테스트</h1>
+  <p>iPad 펜 모드로 이 창 위에 그려 보세요. Windows가 실제로 받은 값입니다.</p>
+  <dl>
+    <dt>종류</dt><dd id="type">–</dd>
+    <dt>필압</dt><dd id="pressure">–</dd>
+    <dt>기울기 X / Y</dt><dd id="tilt">–</dd>
+    <dt>회전</dt><dd id="twist">–</dd>
+    <dt>판정</dt><dd id="verdict">펜을 대 보세요</dd>
+  </dl>
+</div>
+<button id="clear">지우기</button>
+<script>
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const $ = (id) => document.getElementById(id);
+  let last = null;
+  let maxTilt = 0;
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = innerWidth * dpr;
+    canvas.height = innerHeight * dpr;
+    canvas.style.width = innerWidth + "px";
+    canvas.style.height = innerHeight + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  addEventListener("resize", resize);
+  resize();
+  $("clear").addEventListener("click", () => { ctx.clearRect(0, 0, innerWidth, innerHeight); maxTilt = 0; });
+
+  function show(e) {
+    $("type").textContent = e.pointerType === "pen" ? "펜 (Windows Ink)" : e.pointerType + " — 펜이 아님";
+    $("type").className = e.pointerType === "pen" ? "ok" : "warn";
+    $("pressure").textContent = e.pressure.toFixed(3);
+    $("tilt").textContent = `${e.tiltX}° / ${e.tiltY}°`;
+    $("twist").textContent = `${e.twist}°`;
+    if (e.buttons) maxTilt = Math.max(maxTilt, Math.abs(e.tiltX), Math.abs(e.tiltY));
+    const verdict = $("verdict");
+    if (e.pointerType !== "pen") {
+      verdict.textContent = "펜 입력이 아님";
+      verdict.className = "warn";
+    } else if (maxTilt >= 10) {
+      verdict.textContent = "기울기 들어옴 → 클립 스튜디오 브러시 설정 문제";
+      verdict.className = "ok";
+    } else {
+      verdict.textContent = "Pencil을 눕혀서 그려 보세요";
+      verdict.className = "";
+    }
+  }
+
+  canvas.addEventListener("pointermove", (e) => {
+    show(e);
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const p of events) {
+      if (!(p.buttons & 1) || !last) { last = p.buttons & 1 ? p : null; continue; }
+      // 굵기 = 필압, 색 = 기울기 크기
+      const tilt = Math.min(1, Math.hypot(p.tiltX, p.tiltY) / 60);
+      ctx.strokeStyle = `hsl(${170 - tilt * 140}, 60%, 60%)`;
+      ctx.lineWidth = 1 + p.pressure * 18;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(last.offsetX, last.offsetY);
+      ctx.lineTo(p.offsetX, p.offsetY);
+      ctx.stroke();
+      last = p;
+    }
+  });
+  canvas.addEventListener("pointerdown", (e) => { last = e; show(e); canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener("pointerup", () => { last = null; });
+  canvas.addEventListener("pointercancel", () => { last = null; });
+</script>
+</body>
+</html>

@@ -109,7 +109,8 @@ struct AudioEngine::Output {
     bool buffering = true;
     double fillSmooth = 0;
     double ratio = 1.0;
-    uint32_t underruns = 0;
+    uint32_t drained = 0;
+    uint32_t late = 0;
     uint32_t skips = 0;
     std::vector<int16_t> scratch;
 };
@@ -292,7 +293,8 @@ void AudioEngine::Snapshot(const Output& o, AudioOutputStats& s) {
     s.deviceRate = o.deviceRate;
     s.fillMs = o.soundRate > 0 ? float(o.fillSmooth * 1000.0 / o.soundRate) : 0.0f;
     s.correctionPct = float((o.ratio - 1.0) * 100.0);
-    s.underruns = o.underruns;
+    s.drained = o.drained;
+    s.late = o.late;
     s.skips = o.skips;
 }
 
@@ -319,7 +321,8 @@ void AudioEngine::OpenOutput(Output& o, const std::wstring& wanted, int bufferMs
     o.error.clear();
     o.device.clear();
     o.deviceRate = 0;
-    o.underruns = 0;
+    o.drained = 0;
+    o.late = 0;
     o.skips = 0;
     if (!o.asio && wanted.empty()) {
         o.error = L"장치를 고르지 않음";
@@ -435,7 +438,7 @@ void AudioEngine::Pump(Output& o) {
                 // 쓰기가 재생 위치에 따라잡힘 (스레드가 늦게 깨어남)
                 o.writePos = play;
                 ahead = 0;
-                ++o.underruns;
+                ++o.late;
             }
             // 재생 위치보다 이만큼 앞까지 채워 둔다. ASIO는 지연을 줄이려고 짧게.
             unsigned target = std::max(256u, unsigned(uint64_t(o.asio ? 15 : 40) * unsigned(o.soundRate) / 1000));
@@ -490,7 +493,7 @@ void AudioEngine::ReadRing(Output& o, int16_t* dst, unsigned frames) {
             o.readPos += got;
             if (got < frames) {
                 o.buffering = true;
-                ++o.underruns;
+                ++o.drained;
             }
         }
         // 클럭 차이 보정: 버퍼가 목표보다 차 있으면 살짝 빠르게, 모자라면 살짝 느리게 (최대 ±0.5%)
