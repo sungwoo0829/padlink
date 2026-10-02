@@ -9,6 +9,8 @@ enum Wire {
     static let rawVideoPort: UInt16 = 47801
     /// 디버그용: WAV 헤더 + s16le 스트림 (ffplay -f wav)
     static let rawAudioPort: UInt16 = 47802
+    /// 펜 모드(앱이 화면에 떠 있을 때)의 입력 채널
+    static let penPort: UInt16 = 47810
     static let bonjourType = "_padlink._tcp"
     static let protocolVersion = 1
     static let headerSize = 16
@@ -23,6 +25,55 @@ enum Wire {
         case audioPCM = 3
         /// UTF-8 로그 한 줄
         case log = 4
+        /// 펜 샘플 묶음: count u16, reserved u16, 이후 PenSample × count (각 32바이트)
+        case penSamples = 16
+        /// 펜 버튼: button u8(1 = 스퀴즈, 2 = 더블탭), phase u8(0 = 시작, 1 = 끝, 2 = 한 번)
+        case penButton = 17
+        /// PC → iPad: JSON {"width","height","name"} — 펜이 움직일 PC 화면 크기
+        case penConfig = 32
+    }
+
+    enum PenPhase: UInt8 {
+        case hover = 0, down = 1, move = 2, up = 3, hoverExit = 4, cancel = 5
+    }
+
+    enum PenButton: UInt8 {
+        case squeeze = 1, doubleTap = 2
+    }
+
+    enum ButtonPhase: UInt8 {
+        case began = 0, ended = 1, tap = 2
+    }
+
+    /// x, y는 활성 영역 기준 0~1, 각도는 라디안(UIKit 기준), z는 호버 높이 0~1
+    struct PenSample {
+        var phase: PenPhase
+        var x: Float
+        var y: Float
+        var pressure: Float
+        var altitude: Float
+        var azimuth: Float
+        var roll: Float
+        var z: Float
+    }
+
+    static func penPayload(_ samples: [PenSample]) -> Data {
+        var d = Data(capacity: 4 + samples.count * 32)
+        d.appendLE(UInt16(samples.count))
+        d.appendLE(UInt16(0))
+        for s in samples {
+            d.append(s.phase.rawValue)
+            d.append(0)
+            d.appendLE(UInt16(0))
+            for v in [s.x, s.y, s.pressure, s.altitude, s.azimuth, s.roll, s.z] {
+                d.appendLE(v.bitPattern)
+            }
+        }
+        return d
+    }
+
+    static func buttonPayload(_ button: PenButton, _ phase: ButtonPhase) -> Data {
+        Data([button.rawValue, phase.rawValue, 0, 0])
     }
 
     static func frame(_ kind: Kind, flags: UInt8 = 0, pts: UInt64, payload: Data) -> Data {

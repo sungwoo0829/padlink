@@ -10,6 +10,7 @@ final class StreamServer {
         var pendingBytes = 0
         var waitingForKeyframe = true
         var keyframeRequested = false
+        var inbox = Data()
         init(_ connection: NWConnection) { self.connection = connection }
     }
 
@@ -22,6 +23,8 @@ final class StreamServer {
     /// 접속 직후 가장 먼저 보낼 데이터 (서버 큐에서 호출됨)
     var makeGreeting: (() -> Data?)?
     var onKeyframeNeeded: (() -> Void)?
+    /// PC가 보낸 프레임 (kind, payload) — 서버 큐에서 호출됨
+    var onFrame: ((UInt8, Data) -> Void)?
 
     private let queue: DispatchQueue
     private var listener: NWListener?
@@ -163,17 +166,37 @@ final class StreamServer {
             }
         }
         connection.start(queue: queue)
-        receive(on: connection)
+        receive(on: connection, client: client)
     }
 
-    /// 지금은 PC가 보내는 내용을 쓰지 않지만, 끊김을 알아채려고 계속 읽는다
-    private func receive(on connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] _, _, isComplete, error in
+    /// PC가 보내는 프레임을 읽고, 끊김도 여기서 알아챈다
+    private func receive(on connection: NWConnection, client: Client) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            if let data, !data.isEmpty, let self {
+                client.inbox.append(data)
+                self.parseInbox(client)
+            }
             if isComplete || error != nil {
                 connection.cancel()
                 return
             }
-            self?.receive(on: connection)
+            self?.receive(on: connection, client: client)
+        }
+    }
+
+    private func parseInbox(_ client: Client) {
+        while client.inbox.count >= Wire.headerSize {
+            let header = [UInt8](client.inbox.prefix(Wire.headerSize))
+            let length = Int(header[4]) | Int(header[5]) << 8 | Int(header[6]) << 16 | Int(header[7]) << 24
+            guard length <= 1 << 20 else {
+                client.connection.cancel()
+                return
+            }
+            guard client.inbox.count >= Wire.headerSize + length else { return }
+            let start = client.inbox.startIndex
+            let payload = client.inbox.subdata(in: (start + Wire.headerSize)..<(start + Wire.headerSize + length))
+            client.inbox.removeSubrange(start..<(start + Wire.headerSize + length))
+            onFrame?(header[0], payload)
         }
     }
 
