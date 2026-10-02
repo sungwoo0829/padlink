@@ -37,5 +37,5 @@ ffplay -nodisp -f wav tcp://<iPad IP>:47802
 
 1. 송출: iPad → PC 영상·소리 (실기기 확인)
 2. Windows 수신 앱: USB(usbmux) 연결, 영상 창, FMOD ASIO + WASAPI 두 갈래 출력 (진행 중)
-3. 펜 입력: 필압·기울기·배럴 롤·호버 → Windows 합성 펜, 스퀴즈·더블탭 → 단축키
-4. 액정타블렛: 가상 모니터 → NVENC → iPad 표시
+3. 펜 입력: 필압·기울기·배럴 롤·호버 → Windows 합성 펜, 스퀴즈·더블탭 → 단축키 (실기기 확인)
+4. 액정타블렛: 모니터(VDD 가상 모니터) 캡처 → BT.709 NV12 → NVENC → 펜 채널로 iPad 표시 (진행 중)

@@ -20,6 +20,10 @@ struct Settings {
     int pressureGamma = 100;
     int tilt = 1;
     int invertTilt = 0;
+
+    int display = 0;  // 1 = 펜 모니터 화면을 iPad로 보냄 (액정타블렛)
+    int displayBitrateMbps = 40;
+    int displayFps = 60;
 };
 
 Settings LoadSettings();

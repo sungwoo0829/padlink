@@ -38,6 +38,9 @@ Settings LoadSettings() {
     s.pressureGamma = ReadInt(L"pen", L"pressure_gamma", s.pressureGamma);
     s.tilt = ReadInt(L"pen", L"tilt", s.tilt);
     s.invertTilt = ReadInt(L"pen", L"invert_tilt", s.invertTilt);
+    s.display = ReadInt(L"display", L"enabled", s.display);
+    s.displayBitrateMbps = ReadInt(L"display", L"bitrate_mbps", s.displayBitrateMbps);
+    s.displayFps = ReadInt(L"display", L"fps", s.displayFps);
     return s;
 }
 
@@ -58,4 +61,7 @@ void SaveSettings(const Settings& s) {
     Write(L"pen", L"pressure_gamma", s.pressureGamma);
     Write(L"pen", L"tilt", s.tilt);
     Write(L"pen", L"invert_tilt", s.invertTilt);
+    Write(L"display", L"enabled", s.display);
+    Write(L"display", L"bitrate_mbps", s.displayBitrateMbps);
+    Write(L"display", L"fps", s.displayFps);
 }

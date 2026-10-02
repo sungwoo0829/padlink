@@ -37,6 +37,16 @@ PadLink 수신 (Windows)
   클립 스튜디오: 서브 도구 상세 → 브러시 크기(또는 브러시 끝의 방향) 옆 '영향 기준 설정'에서 '기울기'를 켜세요.
   기본 G펜 등은 필압만 씁니다.
 
+액정타블렛 모드 (PC 화면을 iPad에 띄우기)
+1. 새 모니터로 쓰려면 Virtual Display Driver(VDD, github.com/VirtualDrivers/Virtual-Display-Driver)를 설치하고
+   해상도를 iPad Air 11"과 같은 2360x1640, 60Hz로 추가하세요. VDD 설정의 GPU는 RTX로.
+   Windows 디스플레이 설정에서 '디스플레이 확장', 배율은 200%가 iPad와 비슷한 크기입니다.
+   (VDD 없이 기존 모니터를 골라도 그 화면이 iPad에 복제됩니다)
+2. 수신 앱 "펜 → 모니터"에서 그 모니터를 고르고 "iPad에 화면 보내기"를 켭니다.
+3. iPad에서 펜 모드를 열면 그 화면이 펜 영역에 뜨고, 펜 위치가 화면과 1:1로 맞습니다.
+   설정: PadLinkRecv.ini [display] bitrate_mbps=40, fps=60
+   마우스 커서는 화면에 안 그려집니다 (펜 커서는 iPad에서 직접 그림).
+
 단축키 (화면 창에서)
   R  화면 90° 회전
   C  색 범위 전환 (색이 물빠지거나 너무 진하면)

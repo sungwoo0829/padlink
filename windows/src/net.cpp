@@ -30,11 +30,16 @@ void Receiver::Stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-bool Receiver::Send(uint8_t kind, const std::string& payload) {
-    std::lock_guard lock(socketMutex_);
-    if (socket_ == INVALID_SOCKET) return false;
-    wire::Header h{kind, 0, 0, uint32_t(payload.size()), 0};
-    return SendAll(socket_, &h, sizeof(h)) && (payload.empty() || SendAll(socket_, payload.data(), payload.size()));
+bool Receiver::Send(uint8_t kind, const void* data, size_t len, uint8_t flags) {
+    std::lock_guard sendLock(sendMutex_);
+    SOCKET s = INVALID_SOCKET;
+    {
+        std::lock_guard lock(socketMutex_);
+        s = socket_;
+    }
+    if (s == INVALID_SOCKET) return false;
+    wire::Header h{kind, flags, 0, uint32_t(len), 0};
+    return SendAll(s, &h, sizeof(h)) && (len == 0 || SendAll(s, data, len));
 }
 
 void Receiver::Loop() {
@@ -78,6 +83,9 @@ void Receiver::Loop() {
             std::lock_guard lock(socketMutex_);
             socket_ = INVALID_SOCKET;
         }
+        // 다른 스레드가 보내는 중이면 끝날 때까지 기다린 뒤 닫는다
+        shutdown(s, SD_BOTH);
+        { std::lock_guard sendLock(sendMutex_); }
         closesocket(s);
         if (!stop_) {
             Log(label_ + L": 연결 끊김, 다시 연결 중");
@@ -165,6 +173,9 @@ void Receiver::ReadLoop(SOCKET s) {
             break;
         case wire::kPenButton:
             if (h.length >= 2 && cb_.onPenButton) cb_.onPenButton(payload[0], payload[1]);
+            break;
+        case wire::kKeyframeRequest:
+            if (cb_.onKeyframeRequest) cb_.onKeyframeRequest();
             break;
         case wire::kVideoFrame:
             ++videoFrames;

@@ -25,7 +25,8 @@ enum Kind : uint8_t {
     kLog = 4,
     kPenSamples = 16,
     kPenButton = 17,
-    kPenConfig = 32,  // PC → iPad
+    kPenConfig = 32,        // PC → iPad
+    kKeyframeRequest = 33,  // iPad → PC (액정타블렛 화면)
 };
 #pragma pack(push, 1)
 struct Header {

@@ -7,12 +7,14 @@
 #include "log.h"
 #include "net.h"
 #include "pen.h"
+#include "screen.h"
 #include "settings.h"
 #include "video.h"
 
 namespace {
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_STATUS = WM_APP + 2;
+constexpr UINT WM_APP_PEN_LINK = WM_APP + 3;  // wParam 1 = 펜 연결됨, 0 = 끊김
 constexpr UINT_PTR kStatsTimer = 1;
 
 enum ControlId : int {
@@ -28,6 +30,7 @@ enum ControlId : int {
     ID_DISC_BUF,
     ID_DISC_VOL,
     ID_PEN_MON,
+    ID_DISPLAY,
     ID_APPLY,
     ID_SHOW_VIDEO,
     ID_ROTATE,
@@ -46,6 +49,9 @@ Receiver g_penLink;   // 펜 모드 (47810)
 VideoPipeline g_videoPipe;
 AudioEngine g_audio;
 PenInjector g_pen;
+ScreenSender g_screen;
+uint64_t g_lastScreenBytes = 0;
+uint64_t g_lastScreenFrames = 0;
 bool g_videoOk = false;
 bool g_penOk = false;
 std::vector<MonitorInfo> g_monitors;
@@ -187,6 +193,29 @@ void ApplyPen() {
     if (g_penLink.connected) SendPenConfig();
 }
 
+// 펜 채널이 연결돼 있고 '화면 보내기'가 켜져 있으면 펜 모니터를 iPad로 보낸다
+void UpdateScreenSender(bool restart) {
+    bool want = g_settings.display != 0 && g_penLink.connected;
+    if (!want || restart) {
+        if (g_screen.Running()) {
+            g_screen.Stop();
+            Log(L"화면 보내기 중지");
+        }
+    }
+    if (!want || g_screen.Running()) return;
+    ScreenConfig c;
+    c.device = g_settings.penMonitor;
+    if (c.device.empty()) {
+        for (const auto& m : g_monitors)
+            if (m.primary) c.device = m.device;
+    }
+    c.bitrateMbps = g_settings.displayBitrateMbps;
+    c.fps = g_settings.displayFps;
+    g_screen.Start(c, [](const uint8_t* data, size_t size, bool key) {
+        g_penLink.Send(wire::kVideoFrame, data, size, key ? 1 : 0);
+    });
+}
+
 void ApplyAudio() {
     if (!g_audio.Loaded()) return;
     AudioConfig c;
@@ -203,6 +232,7 @@ void ApplyAudio() {
 void ToggleConnect() {
     if (g_receiver.Running()) {
         if (!g_lastStatus.empty()) Log(L"마지막 상태: " + g_lastStatus);
+        g_screen.Stop();
         g_receiver.Stop();
         g_penLink.Stop();
         g_pen.Reset();
@@ -229,8 +259,16 @@ void ToggleConnect() {
     ReceiverCallbacks pen;
     pen.onPenSamples = [](const uint8_t* data, size_t len) { g_pen.OnSamples(data, len); };
     pen.onPenButton = [](uint8_t button, uint8_t phase) { g_pen.OnButton(button, phase); };
-    pen.onConnected = [] { SendPenConfig(); };
-    pen.onDisconnected = [] { g_pen.Reset(); };
+    pen.onKeyframeRequest = [] { g_screen.RequestKeyframe(); };
+    pen.onConnected = [] {
+        SendPenConfig();
+        g_screen.RequestKeyframe();
+        PostMessageW(g_main, WM_APP_PEN_LINK, 1, 0);
+    };
+    pen.onDisconnected = [] {
+        g_pen.Reset();
+        PostMessageW(g_main, WM_APP_PEN_LINK, 0, 0);
+    };
     pen.onStatus = [](const std::wstring& status) {
         auto* copy = new std::wstring(status);
         if (!PostMessageW(g_main, WM_APP_STATUS, 1, reinterpret_cast<LPARAM>(copy))) delete copy;
@@ -275,6 +313,21 @@ void UpdateStatus() {
             penLine += Format(L" · 필압 %.2f · 기울기 X%+d° Y%+d° (세운 각 %.0f°) · 회전 %d°", p.pressure, p.tiltX, p.tiltY,
                               p.altitudeDeg, p.rotation);
     }
+    std::wstring screenLine = L"화면 보내기: ";
+    uint64_t screenBytes = g_screen.bytes.load(), screenFrames = g_screen.frames.load();
+    if (!g_settings.display) {
+        screenLine += L"꺼짐 (켜면 iPad가 액정타블렛)";
+    } else if (!g_screen.Running()) {
+        screenLine += L"iPad 펜 모드 연결을 기다리는 중";
+    } else if (std::wstring e = g_screen.Error(); !e.empty()) {
+        screenLine += e;
+    } else {
+        screenLine += Format(L"%dx%d · %.0ffps · %.1fMbps", g_screen.width.load(), g_screen.height.load(),
+                             dt > 0 ? (screenFrames - g_lastScreenFrames) / dt : 0,
+                             dt > 0 ? (screenBytes - g_lastScreenBytes) * 8 / dt / 1e6 : 0);
+    }
+    g_lastScreenBytes = screenBytes;
+    g_lastScreenFrames = screenFrames;
     std::wstring line2, line3;
     if (g_audio.Loaded()) {
         AudioStats a = g_audio.Stats();
@@ -284,9 +337,10 @@ void UpdateStatus() {
     } else {
         line2 = L"소리 꺼짐 — fmod.dll 필요 (로그 참고)";
     }
-    SetWindowTextW(Item(ID_STATUS), (line1 + L"\r\n" + penLine + L"\r\n" + line2 + L"\r\n" + line3).c_str());
+    SetWindowTextW(Item(ID_STATUS),
+                   (line1 + L"\r\n" + penLine + L"\r\n" + screenLine + L"\r\n" + line2 + L"\r\n" + line3).c_str());
     // 원격으로 상태를 볼 수 있게 연결 중에는 1분마다 로그에도 남긴다
-    g_lastStatus = line1 + L" | " + penLine + L" | " + line2 + L" | " + line3;
+    g_lastStatus = line1 + L" | " + penLine + L" | " + screenLine + L" | " + line2 + L" | " + line3;
     if (g_receiver.connected && ++g_statusTicks % 60 == 0) {
         Log(L"상태: " + g_lastStatus);
         PenStats r = g_pen.TakeRange();
@@ -306,9 +360,9 @@ void CreateControls() {
     SendMessageW(Item(g_settings.mode == 1 ? ID_WIFI : ID_USB), BM_SETCHECK, BST_CHECKED, 0);
 
     y += 36;
-    Control(L"STATIC", L"", SS_LEFT, 12, y, 700, 76, ID_STATUS);
+    Control(L"STATIC", L"", SS_LEFT, 12, y, 700, 94, ID_STATUS);
 
-    y += 84;
+    y += 102;
     Control(L"STATIC", L"내 모니터링 (ASIO)", SS_LEFT, 12, y + 4, 150, 20, -1);
     Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 166, y, 300, 300, ID_ASIO);
     Control(L"STATIC", L"버퍼ms", SS_RIGHT, 470, y + 4, 56, 20, -1);
@@ -331,13 +385,13 @@ void CreateControls() {
     y += 34;
     Control(L"STATIC", L"펜 → 모니터", SS_LEFT, 12, y + 4, 150, 20, -1);
     Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 166, y, 300, 300, ID_PEN_MON);
-    Control(L"STATIC", L"스퀴즈 = Space(손 도구) · 더블탭 = E/P(지우개↔펜) — ini에서 변경", SS_LEFT, 474, y + 4, 238, 40,
-            -1);
+    Control(L"BUTTON", L"iPad에 화면 보내기 (액정타블렛)", BS_AUTOCHECKBOX | WS_TABSTOP, 474, y, 238, 26, ID_DISPLAY);
+    SendMessageW(Item(ID_DISPLAY), BM_SETCHECK, g_settings.display ? BST_CHECKED : BST_UNCHECKED, 0);
 
     y += 40;
     Control(L"STATIC",
-            L"디스코드에서는 'PadLink 화면' 창을 공유하세요. 디스코드용 출력은 내가 듣지 않는 장치로 고르고, 볼륨 믹서에서 "
-            L"이 앱을 음소거하지 마세요. 클립 스튜디오는 [파일 > 환경 설정 > 태블릿]을 TabletPC로.",
+            L"디스코드에서는 'PadLink 화면' 창을 공유하세요(디스코드용 출력은 내가 안 듣는 장치로, 이 앱 음소거 금지). "
+            L"펜: 스퀴즈 = Space, 더블탭 = E/P (ini에서 변경). 클립 스튜디오 태블릿 설정은 TabletPC.",
             SS_LEFT, 12, y, 700, 40, -1);
 
     y += 46;
@@ -394,13 +448,23 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 ApplyPen();
                 SaveSettings(g_settings);
+                if (g_screen.Running()) UpdateScreenSender(true);
             }
+            return 0;
+        case ID_DISPLAY:
+            g_settings.display = SendMessageW(Item(ID_DISPLAY), BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0;
+            SaveSettings(g_settings);
+            UpdateScreenSender(false);
             return 0;
         }
         break;
     case WM_DISPLAYCHANGE:
         FillMonitors();
         ApplyPen();
+        if (g_screen.Running()) UpdateScreenSender(true);
+        return 0;
+    case WM_APP_PEN_LINK:
+        UpdateScreenSender(false);
         return 0;
     case WM_TIMER:
         if (wp == kStatsTimer) UpdateStatus();
@@ -427,6 +491,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         LogSetWindow(nullptr, 0);
         ReadUi();
         SaveSettings(g_settings);
+        g_screen.Stop();
         g_receiver.Stop();
         g_penLink.Stop();
         g_pen.Reset();
@@ -501,7 +566,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&vc);
 
     DWORD mainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(724), S(626)};
+    RECT rc{0, 0, S(724), S(644)};
     AdjustWindowRect(&rc, mainStyle, FALSE);
     g_main = CreateWindowExW(0, L"PadLinkMain", L"PadLink 수신", mainStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                              rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);

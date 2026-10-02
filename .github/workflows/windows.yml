@@ -15,8 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: NVENC headers
+        shell: bash
+        run: git clone --depth 1 --branch n12.2.72.0 https://github.com/FFmpeg/nv-codec-headers.git deps/nv-codec-headers
+
       - name: Configure
-        run: cmake -S windows -B build -A x64
+        run: cmake -S windows -B build -A x64 -DNVCODEC_INCLUDE_DIR="${{ github.workspace }}/deps/nv-codec-headers/include/ffnvcodec"
 
       - name: Build
         run: cmake --build build --config Release -- /m /v:minimal

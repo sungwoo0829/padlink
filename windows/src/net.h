@@ -14,6 +14,7 @@ struct ReceiverCallbacks {
     std::function<void(const int16_t* pcm, size_t frames, int sampleRate)> onAudio;
     std::function<void(const uint8_t* data, size_t len)> onPenSamples;
     std::function<void(uint8_t button, uint8_t phase)> onPenButton;
+    std::function<void()> onKeyframeRequest;
     std::function<void()> onConnected;     // 연결 직후 (Send 가능)
     std::function<void()> onDisconnected;
     std::function<void(const std::wstring& status)> onStatus;
@@ -28,7 +29,9 @@ public:
                ReceiverCallbacks callbacks);
     void Stop();
     bool Running() const { return thread_.joinable(); }
-    bool Send(uint8_t kind, const std::string& payload);
+    // 여러 스레드에서 불러도 프레임이 섞이지 않는다. 연결이 없으면 false.
+    bool Send(uint8_t kind, const void* data, size_t len, uint8_t flags = 0);
+    bool Send(uint8_t kind, const std::string& payload) { return Send(kind, payload.data(), payload.size()); }
 
     std::atomic<uint64_t> bytes{0};
     std::atomic<uint64_t> videoFrames{0};
@@ -50,6 +53,7 @@ private:
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::mutex socketMutex_;
+    std::mutex sendMutex_;
     SOCKET socket_ = INVALID_SOCKET;
     std::mutex waitMutex_;
     std::condition_variable waitCv_;
