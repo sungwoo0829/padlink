@@ -2,7 +2,7 @@ import AVFoundation
 import CoreMedia
 import UIKit
 
-/// PC 화면(H.264 Annex-B)을 AVSampleBufferDisplayLayer로 바로 띄운다 (액정타블렛 모드)
+/// PC 화면(HEVC 또는 H.264, Annex-B)을 AVSampleBufferDisplayLayer로 바로 띄운다 (액정타블렛 모드)
 final class VideoReceiver {
     let layer = AVSampleBufferDisplayLayer()
     /// 디코딩을 이어가려면 키프레임이 필요할 때 (내부 큐에서 호출됨)
@@ -12,10 +12,11 @@ final class VideoReceiver {
     private let lock = NSLock()
     private var lastFrameUptime: TimeInterval = 0
     private var format: CMVideoFormatDescription?
+    private var formatIsHEVC = false
+    private var vps = Data()
     private var sps = Data()
     private var pps = Data()
-    private var formatSPS = Data()
-    private var formatPPS = Data()
+    private var formatSets: [Data] = []
     private var waitingForKey = true
     private var lastKeyRequest: TimeInterval = 0
 
@@ -31,8 +32,8 @@ final class VideoReceiver {
         return ProcessInfo.processInfo.systemUptime - lastFrameUptime < 2
     }
 
-    func submit(_ annexB: Data) {
-        queue.async { self.handle(annexB) }
+    func submit(_ annexB: Data, hevc: Bool) {
+        queue.async { self.handle(annexB, hevc: hevc) }
     }
 
     func clear() {
@@ -47,20 +48,43 @@ final class VideoReceiver {
 
     // MARK: - 내부 큐
 
-    private func handle(_ annexB: Data) {
+    private func handle(_ annexB: Data, hevc: Bool) {
+        if hevc != formatIsHEVC {
+            formatIsHEVC = hevc
+            format = nil
+            formatSets = []
+            vps = Data()
+            sps = Data()
+            pps = Data()
+            waitingForKey = true
+        }
         var isKey = false
         var units: [Data] = []
         for nal in Self.split(annexB) {
             guard let header = nal.first else { continue }
-            switch header & 0x1F {
-            case 7: sps = nal
-            case 8: pps = nal
-            case 9: break  // AUD
-            case 5:
-                isKey = true
-                units.append(nal)
-            default:
-                units.append(nal)
+            if hevc {
+                switch (header >> 1) & 0x3F {
+                case 32: vps = nal
+                case 33: sps = nal
+                case 34: pps = nal
+                case 35: break  // AUD
+                case 16...21:  // IDR·CRA 등 키프레임
+                    isKey = true
+                    units.append(nal)
+                default:
+                    units.append(nal)
+                }
+            } else {
+                switch header & 0x1F {
+                case 7: sps = nal
+                case 8: pps = nal
+                case 9: break  // AUD
+                case 5:
+                    isKey = true
+                    units.append(nal)
+                default:
+                    units.append(nal)
+                }
             }
         }
         if isKey { rebuildFormatIfNeeded() }
@@ -97,26 +121,40 @@ final class VideoReceiver {
     }
 
     private func rebuildFormatIfNeeded() {
-        guard !sps.isEmpty, !pps.isEmpty, format == nil || sps != formatSPS || pps != formatPPS else { return }
+        let sets = formatIsHEVC ? [vps, sps, pps] : [sps, pps]
+        guard sets.allSatisfy({ !$0.isEmpty }), format == nil || sets != formatSets else { return }
         var created: CMFormatDescription?
-        let status = sps.withUnsafeBytes { s in
-            pps.withUnsafeBytes { p -> OSStatus in
-                let pointers = [s.bindMemory(to: UInt8.self).baseAddress!, p.bindMemory(to: UInt8.self).baseAddress!]
-                let sizes = [s.count, p.count]
-                return CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    allocator: kCFAllocatorDefault, parameterSetCount: 2, parameterSetPointers: pointers,
-                    parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &created)
+        let hevc = formatIsHEVC
+        let status = Self.withPointers(sets) { pointers, sizes -> OSStatus in
+            if hevc {
+                return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                    allocator: kCFAllocatorDefault, parameterSetCount: pointers.count, parameterSetPointers: pointers,
+                    parameterSetSizes: sizes, nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &created)
             }
+            return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                allocator: kCFAllocatorDefault, parameterSetCount: pointers.count, parameterSetPointers: pointers,
+                parameterSetSizes: sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &created)
         }
         guard status == noErr, let created else {
             Log.write("PC 화면 형식을 만들 수 없음 \(status)")
             return
         }
         format = created
-        formatSPS = sps
-        formatPPS = pps
+        formatSets = sets
         let dims = CMVideoFormatDescriptionGetDimensions(created)
-        Log.write("PC 화면 수신 \(dims.width)x\(dims.height)")
+        Log.write("PC 화면 수신 \(dims.width)x\(dims.height) \(hevc ? "HEVC" : "H.264")")
+    }
+
+    /// Data 배열을 C 포인터 배열로 넘긴다 (포인터는 body 안에서만 유효)
+    private static func withPointers<R>(_ sets: [Data], _ body: ([UnsafePointer<UInt8>], [Int]) -> R) -> R {
+        var copies: [UnsafeMutablePointer<UInt8>] = []
+        for d in sets {
+            let p = UnsafeMutablePointer<UInt8>.allocate(capacity: max(d.count, 1))
+            d.copyBytes(to: p, count: d.count)
+            copies.append(p)
+        }
+        defer { copies.forEach { $0.deallocate() } }
+        return body(copies.map { UnsafePointer($0) }, sets.map(\.count))
     }
 
     /// 시작 코드(00 00 01 / 00 00 00 01)로 NAL 단위를 나눈다

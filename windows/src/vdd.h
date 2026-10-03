@@ -1,13 +1,21 @@
 #pragma once
 #include "common.h"
 
-// Virtual Display Driver(VirtualDrivers/Virtual-Display-Driver) 제어.
-// 드라이버의 제어 파이프(\\.\pipe\MTTVirtualDisplayPipe, Everyone 허용)에 SETDISPLAYCOUNT를 보내므로
-// 관리자 권한이 필요 없다. 공식 Virtual Driver Control 앱과 같은 방식.
+// Virtual Display Driver(VirtualDrivers/Virtual-Display-Driver) 가상 모니터 켜기/끄기.
+//
+// 드라이버 파이프의 SETDISPLAYCOUNT는 설정 파일만 바꾸고 실제 모니터에 반영되지 않는 버전이
+// 있어서(실측), Windows 디스플레이 구성(CCD)으로 VDD 모니터의 경로를 연결하고 끊는다.
+// 설정 앱의 '이 디스플레이 연결 끊기'와 같은 동작이고 관리자 권한이 필요 없다.
 
-bool VddInstalled();  // 제어 파이프가 떠 있는지 (드라이버가 동작 중인지)
-bool VddSetDisplayCount(int count, std::wstring& error);  // 0이면 가상 모니터를 모두 뺀다
-void VddSetDisplayCountAsync(int count);                   // 결과는 로그로
+struct VddState {
+    bool installed = false;  // VDD 모니터가 Windows에 잡혀 있음 (꺼져 있어도)
+    bool active = false;     // 바탕 화면에 붙어 있음
+    std::wstring device;     // 켜져 있으면 \\.\DISPLAYn
+};
 
-// 지금 켜져 있는 VDD 모니터의 GDI 이름 (\\.\DISPLAYn)
-std::vector<std::wstring> VddMonitorDevices();
+VddState VddQuery();
+bool VddSetActive(bool active, std::wstring& error);
+
+// 예전 버전이 SETDISPLAYCOUNT 0을 보내서 설정 파일의 모니터 수가 0이 됐으면 1로 되돌린다.
+// (그대로 두면 재부팅 뒤 VDD 모니터가 아예 생기지 않는다)
+void VddRepairConfig();

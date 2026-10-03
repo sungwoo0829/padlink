@@ -9,11 +9,12 @@
 
 struct ScreenConfig {
     std::wstring device;  // \\.\DISPLAYn — 펜이 움직이는 모니터와 같다
-    int bitrateMbps = 40;
-    int fps = 60;
+    int bitrateMbps = 60;
+    bool hevc = true;
 };
 
-// 액정타블렛 모드: 모니터를 Desktop Duplication으로 캡처 → BT.709 NV12 → NVENC H.264 → iPad
+// 액정타블렛 모드: 모니터를 Desktop Duplication으로 캡처 → BT.709 NV12 → NVENC(HEVC/H.264) → iPad.
+// 화면이 멈춰 있어도 60fps로 일정하게 보낸다 (바뀐 게 없으면 마지막 화면을 다시 인코딩).
 class ScreenSender {
 public:
     using FrameCallback = std::function<void(const uint8_t* data, size_t size, bool key)>;

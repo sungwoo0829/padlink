@@ -25,6 +25,10 @@ final class SampleHandler: RPBroadcastSampleHandler {
         rawVideo.onKeyframeNeeded = wantKeyframe
 
         server.makeGreeting = { Wire.frame(.hello, pts: 0, payload: Wire.helloPayload(role: "broadcast")) }
+        server.onFrame = { [weak self] kind, _, payload in
+            guard kind == Wire.Kind.control.rawValue, let message = LocalControl.parse(payload) else { return }
+            self?.handleControl(message)
+        }
         rawAudio.makeGreeting = { [audio] in
             let rate = audio.sampleRate
             return Wire.wavHeader(sampleRate: rate > 0 ? rate : 48_000)
@@ -35,6 +39,22 @@ final class SampleHandler: RPBroadcastSampleHandler {
         rawVideo.start()
         rawAudio.start()
         Log.write("방송 시작")
+        // 펜 모드(액정타블렛)가 열려 있으면 닫는다 — USB 대역을 나눠 쓰지 않도록 하나만 켠다
+        LocalControl.send(["cmd": "close"], toPort: Wire.penPort)
+    }
+
+    private func handleControl(_ message: [String: Any]) {
+        if let bitrate = message["bitrate"] as? Int, bitrate > 0 {
+            encoder.setBitrate(bitrate)
+            Log.write("송출 비트레이트 \(bitrate / 1_000_000)Mbps")
+        }
+        if message["cmd"] as? String == "stop" {
+            Log.write("펜 모드가 시작돼서 송출을 멈춤")
+            let reason = NSError(domain: "PadLink", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "펜 모드(액정타블렛)를 시작해서 송출을 멈췄어요.",
+            ])
+            finishBroadcastWithError(reason)
+        }
     }
 
     override func broadcastFinished() {

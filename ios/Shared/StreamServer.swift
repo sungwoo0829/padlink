@@ -23,8 +23,8 @@ final class StreamServer {
     /// 접속 직후 가장 먼저 보낼 데이터 (서버 큐에서 호출됨)
     var makeGreeting: (() -> Data?)?
     var onKeyframeNeeded: (() -> Void)?
-    /// PC가 보낸 프레임 (kind, payload) — 서버 큐에서 호출됨
-    var onFrame: ((UInt8, Data) -> Void)?
+    /// 받은 프레임 (kind, flags, payload) — 서버 큐에서 호출됨
+    var onFrame: ((UInt8, UInt8, Data) -> Void)?
 
     private let queue: DispatchQueue
     private var listener: NWListener?
@@ -197,7 +197,7 @@ final class StreamServer {
             let start = client.inbox.startIndex
             let payload = client.inbox.subdata(in: (start + Wire.headerSize)..<(start + Wire.headerSize + length))
             client.inbox.removeSubrange(start..<(start + Wire.headerSize + length))
-            onFrame?(header[0], payload)
+            onFrame?(header[0], header[1], payload)
         }
     }
 

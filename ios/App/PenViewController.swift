@@ -75,12 +75,20 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
         canvas.addGestureRecognizer(tap)
 
         server.makeGreeting = { Wire.frame(.hello, pts: 0, payload: Wire.helloPayload(role: "pen")) }
-        server.onFrame = { [weak self, video] kind, payload in
+        server.onFrame = { [weak self, video] kind, flags, payload in
             switch kind {
             case Wire.Kind.videoFrame.rawValue:
-                video.submit(payload)
+                video.submit(payload, hevc: flags & 2 != 0)
             case Wire.Kind.penConfig.rawValue:
                 DispatchQueue.main.async { self?.applyConfig(payload) }
+            case Wire.Kind.control.rawValue:
+                // 송출(방송)이 시작되면 펜 모드를 닫는다 — 둘은 하나만 켠다
+                if LocalControl.parse(payload)?["cmd"] as? String == "close" {
+                    DispatchQueue.main.async {
+                        Log.write("송출이 시작돼서 펜 모드를 닫음")
+                        self?.close()
+                    }
+                }
             default:
                 break
             }
@@ -94,6 +102,8 @@ final class PenViewController: UIViewController, UIPencilInteractionDelegate {
             server.sendAll(Wire.frame(.log, pts: 0, payload: Data(line.utf8)))
         }
         server.start()
+        // 송출(방송) 중이면 멈춘다 — 펜 모드와 송출은 하나만 켠다
+        LocalControl.send(["cmd": "stop"], toPort: Wire.port)
         statusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateStatus()
         }

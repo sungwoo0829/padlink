@@ -33,6 +33,8 @@ enum Wire {
         case penConfig = 32
         /// iPad → PC: 화면 디코딩을 이어가려면 키프레임이 필요함 (액정타블렛 모드)
         case keyframeRequest = 33
+        /// JSON 제어: {"cmd":"stop"} 송출 멈춤, {"cmd":"close"} 펜 모드 닫기, {"bitrate":n} 송출 비트레이트
+        case control = 48
     }
 
     enum PenPhase: UInt8 {

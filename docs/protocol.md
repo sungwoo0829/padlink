@@ -32,6 +32,11 @@ Wi-Fi는 iPad IP로 바로 연결한다. Bonjour 서비스 타입은 `_padlink._
 | 16 | penSamples | count u16, reserved u16, 이후 샘플 × count. 샘플 32바이트: phase u8(0 호버, 1 닿음, 2 이동, 3 뗌, 4 호버 끝, 5 취소), flags u8, reserved u16, x, y, pressure, altitude, azimuth, roll, z (모두 f32). x·y는 활성 영역 기준 0~1, 각도는 라디안(UIKit 기준: azimuth 0 = 오른쪽, 시계 방향 +) |
 | 17 | penButton | button u8(1 스퀴즈, 2 더블탭), phase u8(0 시작, 1 끝, 2 한 번), reserved u16 |
 | 32 | penConfig | PC → iPad. JSON `{"width","height"}` — 펜이 움직일 PC 화면 크기. iPad는 이 비율로 활성 영역을 잡는다 |
+| 33 | keyframeRequest | iPad → PC (펜 채널). 액정타블렛 화면을 다시 디코딩하려면 키프레임이 필요함 |
+| 48 | control | JSON. `{"cmd":"stop"}` 방송 확장이 송출을 멈춤(앱 펜 모드가 보냄), `{"cmd":"close"}` 앱이 펜 모드를 닫음(방송 확장이 보냄), `{"bitrate":n}` 송출 비트레이트(PC가 보냄) |
+
+- 펜 채널의 PC → iPad videoFrame은 액정타블렛 화면이다. flags bit0 = 키프레임, bit1 = HEVC(아니면 H.264). 60fps로 일정하게 온다.
+- 펜 모드와 송출은 하나만 켠다(USB 대역). 앱과 방송 확장이 127.0.0.1의 서로 포트로 control을 보내 정리한다.
 
 - 접속 직후 영상은 키프레임부터 온다. 화면이 멈춰 있어도 0.2초 안에 마지막 화면으로 키프레임을 만든다.
 - 네트워크가 밀리면(4MB 초과) 영상은 다음 키프레임까지 건너뛰고, 소리는 그 조각을 버린다.

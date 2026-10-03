@@ -3,6 +3,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <nvEncodeAPI.h>
+#include <mmsystem.h>
 #include <objbase.h>
 #include <wrl/client.h>
 
@@ -16,6 +17,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 constexpr UINT kNvidiaVendor = 0x10DE;
+constexpr uint32_t kFps = 60;  // iPad Air 화면이 60Hz라 60fps 고정
 
 // nvEncodeAPI64.dll은 NVIDIA 드라이버에 들어 있다. 한 번만 불러 둔다.
 struct NvencLibrary {
@@ -214,44 +216,57 @@ struct Capture {
             return false;
         }
 
+        // 화질: 그림·글자가 많은 화면이라 HEVC + P4. 초저지연 튜닝, B프레임 없음, CBR.
+        const GUID codec = config.hevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+        const GUID presetGuid = NV_ENC_PRESET_P4_GUID;
         NV_ENC_PRESET_CONFIG preset{};
         preset.version = NV_ENC_PRESET_CONFIG_VER;
         preset.presetCfg.version = NV_ENC_CONFIG_VER;
-        st = nv.nvEncGetEncodePresetConfigEx(encoder, NV_ENC_CODEC_H264_GUID, NV_ENC_PRESET_P2_GUID,
-                                             NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset);
+        st = nv.nvEncGetEncodePresetConfigEx(encoder, codec, presetGuid, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset);
         if (st != NV_ENC_SUCCESS) {
             error = Format(L"NVENC 프리셋 읽기 실패 (%d)", (int)st);
             return false;
         }
         NV_ENC_CONFIG cfg = preset.presetCfg;
         cfg.version = NV_ENC_CONFIG_VER;
-        cfg.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+        cfg.profileGUID = config.hevc ? NV_ENC_HEVC_PROFILE_MAIN_GUID : NV_ENC_H264_PROFILE_HIGH_GUID;
         cfg.gopLength = NVENC_INFINITE_GOPLENGTH;
         cfg.frameIntervalP = 1;  // B프레임 없음
         uint32_t bitrate = uint32_t(std::max(5, config.bitrateMbps)) * 1000000u;
-        int fps = std::max(10, config.fps);
         cfg.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
         cfg.rcParams.averageBitRate = bitrate;
         cfg.rcParams.maxBitRate = bitrate;
-        cfg.rcParams.vbvBufferSize = bitrate / uint32_t(fps) * 2;
+        // USB는 비트레이트보다 훨씬 넓어서 화면이 크게 바뀔 때 프레임을 크게 쓰게 버퍼를 4프레임으로 둔다
+        cfg.rcParams.vbvBufferSize = bitrate / kFps * 4;
         cfg.rcParams.vbvInitialDelay = cfg.rcParams.vbvBufferSize;
-        auto& h264 = cfg.encodeCodecConfig.h264Config;
-        h264.idrPeriod = NVENC_INFINITE_GOPLENGTH;
-        h264.repeatSPSPPS = 1;
+        cfg.rcParams.enableAQ = 1;  // 평평한 바탕(캔버스)에 비트를 더 준다
+
         // 색 정보: BT.709, 16-235 (아래 비디오 프로세서 변환과 같게)
-        auto& vui = h264.h264VUIParameters;
-        vui.videoSignalTypePresentFlag = 1;
-        vui.videoFormat = decltype(vui.videoFormat)(5);
-        vui.videoFullRangeFlag = 0;
-        vui.colourDescriptionPresentFlag = 1;
-        vui.colourPrimaries = decltype(vui.colourPrimaries)(1);
-        vui.transferCharacteristics = decltype(vui.transferCharacteristics)(1);
-        vui.colourMatrix = decltype(vui.colourMatrix)(1);
+        auto setVui = [](auto& vui) {
+            vui.videoSignalTypePresentFlag = 1;
+            vui.videoFormat = decltype(vui.videoFormat)(5);
+            vui.videoFullRangeFlag = 0;
+            vui.colourDescriptionPresentFlag = 1;
+            vui.colourPrimaries = decltype(vui.colourPrimaries)(1);
+            vui.transferCharacteristics = decltype(vui.transferCharacteristics)(1);
+            vui.colourMatrix = decltype(vui.colourMatrix)(1);
+        };
+        if (config.hevc) {
+            auto& hevc = cfg.encodeCodecConfig.hevcConfig;
+            hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+            hevc.repeatSPSPPS = 1;
+            setVui(hevc.hevcVUIParameters);
+        } else {
+            auto& h264 = cfg.encodeCodecConfig.h264Config;
+            h264.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+            h264.repeatSPSPPS = 1;
+            setVui(h264.h264VUIParameters);
+        }
 
         NV_ENC_INITIALIZE_PARAMS init{};
         init.version = NV_ENC_INITIALIZE_PARAMS_VER;
-        init.encodeGUID = NV_ENC_CODEC_H264_GUID;
-        init.presetGUID = NV_ENC_PRESET_P2_GUID;
+        init.encodeGUID = codec;
+        init.presetGUID = presetGuid;
         init.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
         init.encodeWidth = encW;
         init.encodeHeight = encH;
@@ -259,7 +274,7 @@ struct Capture {
         init.darHeight = encH;
         init.maxEncodeWidth = encW;
         init.maxEncodeHeight = encH;
-        init.frameRateNum = uint32_t(fps);
+        init.frameRateNum = kFps;
         init.frameRateDen = 1;
         init.enablePTD = 1;
         init.encodeConfig = &cfg;
@@ -469,14 +484,16 @@ bool ScreenSender::Wait(int ms) {
 
 void ScreenSender::Thread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    timeBeginPeriod(1);  // 프레임 간격(16.7ms)을 맞추려면 1ms 단위 대기가 필요
     {
+        using Clock = std::chrono::steady_clock;
+        const auto interval = std::chrono::nanoseconds(1000000000LL / kFps);
         Capture cap;
         bool open = false;
-        bool pending = false;     // 받았지만 아직 인코딩 안 한 프레임
-        bool haveEncoded = false;
+        bool haveFrame = false;  // NV12에 보낼 화면이 들어 있음
+        bool fresh = false;      // 마지막 인코딩 이후 새 화면이 들어옴
         uint64_t index = 0;
-        auto lastEncode = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-        const auto interval = std::chrono::microseconds(1000000 / std::max(10, config_.fps));
+        auto lastEncode = Clock::now() - interval;
         std::wstring lastError;
 
         while (!stop_) {
@@ -491,18 +508,24 @@ void ScreenSender::Thread() {
                     continue;
                 }
                 open = true;
-                pending = false;
-                haveEncoded = false;
+                haveFrame = false;
+                fresh = false;
                 keyRequested_ = true;
                 lastError.clear();
                 SetError(L"");
                 width = int(cap.encW);
                 height = int(cap.encH);
-                Log(Format(L"화면 보내기 시작: %ls %ux%u, %dMbps", config_.device.c_str(), cap.encW, cap.encH,
-                           config_.bitrateMbps));
+                Log(Format(L"화면 보내기 시작: %ls %ux%u, %ls %dMbps, 60fps", config_.device.c_str(), cap.encW,
+                           cap.encH, config_.hevc ? L"HEVC" : L"H.264", config_.bitrateMbps));
             }
 
-            auto result = cap.Acquire(16, error);
+            // 다음 프레임 시각까지 새 화면을 기다린다
+            auto now = Clock::now();
+            auto deadline = lastEncode + interval;
+            UINT timeoutMs = now < deadline
+                                 ? UINT(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count() + 1)
+                                 : 0;
+            auto result = cap.Acquire(timeoutMs, error);
             if (result == Capture::Result::Lost) {
                 // 해상도 변경, 전체 화면 전환, UAC 창 등
                 if (!cap.OpenDuplication(error)) {
@@ -522,23 +545,26 @@ void ScreenSender::Thread() {
                 if (Wait(500)) break;
                 continue;
             }
-            if (result == Capture::Result::Frame) pending = true;
-
-            auto now = std::chrono::steady_clock::now();
-            bool encode = false;
-            if (pending && now - lastEncode >= interval) encode = true;
-            // 화면이 멈춰 있어도 새로 붙은 iPad가 키프레임을 받게 마지막 화면을 다시 인코딩
-            if (!pending && haveEncoded && keyRequested_ && now - lastEncode > std::chrono::milliseconds(100))
-                encode = true;
-            if (!encode) continue;
-
-            if (pending && !cap.Convert(error)) {
-                Log(L"화면 보내기: " + error);
-                open = false;
-                cap.Close();
-                continue;
+            if (result == Capture::Result::Frame) {
+                if (!cap.Convert(error)) {
+                    Log(L"화면 보내기: " + error);
+                    open = false;
+                    cap.Close();
+                    continue;
+                }
+                haveFrame = true;
+                fresh = true;
             }
-            bool idr = keyRequested_.exchange(false) || !haveEncoded;
+            if (!haveFrame) continue;
+
+            // 새 화면은 바로 보내고(지연 최소), 화면이 멈춰 있으면 마지막 화면을 다시 보내 60fps를 유지한다.
+            // 새 화면이 너무 빨리 오면(모니터가 60Hz보다 빠름) 다음 시각까지 미룬다.
+            now = Clock::now();
+            bool due = now >= lastEncode + interval;
+            bool early = fresh && now >= lastEncode + interval * 3 / 4;
+            if (!due && !early) continue;
+
+            bool idr = keyRequested_.exchange(false);
             bool key = false;
             if (!cap.Encode(idr, index++, key, error)) {
                 Log(L"화면 보내기: " + error + L" — 다시 시작");
@@ -548,13 +574,15 @@ void ScreenSender::Thread() {
                 if (Wait(500)) break;
                 continue;
             }
-            pending = false;
-            haveEncoded = true;
-            lastEncode = now;
+            // 많이 밀렸으면(멈춤 등) 몰아서 보내지 않고 지금부터 다시 센다
+            lastEncode = now - lastEncode > interval * 3 ? now : lastEncode + interval;
+            if (lastEncode > now) lastEncode = now;
+            fresh = false;
             ++frames;
             bytes += cap.out.size();
             if (onFrame_ && !cap.out.empty()) onFrame_(cap.out.data(), cap.out.size(), key);
         }
     }
+    timeEndPeriod(1);
     CoUninitialize();
 }

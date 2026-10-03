@@ -38,17 +38,20 @@ PadLink 수신 (Windows)
   기본 G펜 등은 필압만 씁니다.
 
 액정타블렛 모드 (PC 화면을 iPad에 띄우기)
-1. 새 모니터로 쓰려면 Virtual Display Driver(VDD, github.com/VirtualDrivers/Virtual-Display-Driver)를 설치하고
+1. Virtual Display Driver(VDD, github.com/VirtualDrivers/Virtual-Display-Driver)를 설치하고
    해상도를 iPad Air 11"과 같은 2360x1640, 60Hz로 추가하세요. VDD 설정의 GPU는 RTX로.
    Windows 디스플레이 설정에서 '디스플레이 확장', 배율은 200%가 iPad와 비슷한 크기입니다.
-   (VDD 없이 기존 모니터를 골라도 그 화면이 iPad에 복제됩니다)
-2. 수신 앱 "펜 → 모니터"에서 "가상 모니터 (VDD) · 자동"을 고르고 "iPad에 화면 보내기"를 켭니다.
-   가상 모니터는 iPad 펜 모드가 연결될 때 자동으로 켜지고, 끊긴 지 10초 뒤(또는 수신 앱을 끌 때) 꺼집니다.
-   꺼지면 그 위에 있던 창은 Windows가 다른 모니터로 옮깁니다. 관리자 권한은 필요 없습니다.
-   '자동'을 고르면 VDD는 PadLink가 관리합니다. 다른 모니터를 고르면 VDD는 건드리지 않습니다.
-   켤 때 개수: PadLinkRecv.ini [display] vdd_count=1
-3. iPad에서 펜 모드를 열면 그 화면이 펜 영역에 뜨고, 펜 위치가 화면과 1:1로 맞습니다.
-   설정: PadLinkRecv.ini [display] bitrate_mbps=40, fps=60
+2. 수신 앱 "펜 → 모니터"에서 "가상 모니터 (VDD)"를 고르세요. (화면 보내기는 자동으로 켜짐)
+   - 가상 모니터는 평소에는 꺼 둡니다. iPad에서 펜 모드를 열면 켜지고, 닫은 지 5초 뒤 꺼집니다.
+   - 끄고 켜기는 설정 앱의 '이 디스플레이 연결 끊기'와 같은 방식이라 관리자 권한이 필요 없고,
+     꺼질 때 그 위의 창은 Windows가 다른 모니터로 옮깁니다.
+   - 다른 모니터를 고르면 그 화면을 iPad에 복제하고, VDD는 건드리지 않습니다.
+3. 화질: "액정타블렛 화질" 칸(Mbps)을 바꾸고 [적용]. HEVC, 60fps 고정입니다.
+   화면이 멈춰 있어도 60fps로 보냅니다. 화질이 부족하면 80~120으로 올려 보세요.
+   (PadLinkRecv.ini [display] codec=h264 로 H.264로 바꿀 수 있음)
+4. iPad에서 펜 모드와 송출(방송)은 하나만 켜집니다. 펜 모드를 열면 송출이 멈추고,
+   송출을 시작하면 펜 모드가 닫힙니다. (USB 대역을 나눠 쓰지 않도록)
+   송출 화질은 "송출 화질" 칸에서 바꿉니다(바로 적용).
    마우스 커서는 화면에 안 그려집니다 (펜 커서는 iPad에서 직접 그림).
 
 단축키 (화면 창에서)

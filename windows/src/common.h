@@ -27,6 +27,7 @@ enum Kind : uint8_t {
     kPenButton = 17,
     kPenConfig = 32,        // PC → iPad
     kKeyframeRequest = 33,  // iPad → PC (액정타블렛 화면)
+    kControl = 48,          // JSON 제어 메시지 (PC → 방송 확장: {"bitrate"})
 };
 #pragma pack(push, 1)
 struct Header {

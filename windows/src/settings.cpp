@@ -40,7 +40,8 @@ Settings LoadSettings() {
     s.invertTilt = ReadInt(L"pen", L"invert_tilt", s.invertTilt);
     s.display = ReadInt(L"display", L"enabled", s.display);
     s.displayBitrateMbps = ReadInt(L"display", L"bitrate_mbps", s.displayBitrateMbps);
-    s.displayFps = ReadInt(L"display", L"fps", s.displayFps);
+    s.displayCodec = ReadString(L"display", L"codec", s.displayCodec);
+    s.broadcastBitrateMbps = ReadInt(L"broadcast", L"bitrate_mbps", s.broadcastBitrateMbps);
     s.vddCount = ReadInt(L"display", L"vdd_count", s.vddCount);
     s.vddOwned = ReadInt(L"display", L"vdd_owned", s.vddOwned);
     return s;
@@ -65,7 +66,8 @@ void SaveSettings(const Settings& s) {
     Write(L"pen", L"invert_tilt", s.invertTilt);
     Write(L"display", L"enabled", s.display);
     Write(L"display", L"bitrate_mbps", s.displayBitrateMbps);
-    Write(L"display", L"fps", s.displayFps);
+    Write(L"display", L"codec", s.displayCodec);
+    Write(L"broadcast", L"bitrate_mbps", s.broadcastBitrateMbps);
     Write(L"display", L"vdd_count", s.vddCount);
     Write(L"display", L"vdd_owned", s.vddOwned);
 }

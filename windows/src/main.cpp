@@ -3,6 +3,8 @@
 #include <commctrl.h>
 
 #include <algorithm>
+#include <memory>
+#include <thread>
 #include <objbase.h>
 
 #include "audio.h"
@@ -18,6 +20,7 @@ namespace {
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_STATUS = WM_APP + 2;
 constexpr UINT WM_APP_PEN_LINK = WM_APP + 3;  // wParam 1 = 펜 연결됨, 0 = 끊김
+constexpr UINT WM_APP_VDD_DONE = WM_APP + 4;  // wParam 1 = 켬, lParam = new std::wstring* 오류(없으면 nullptr)
 constexpr UINT_PTR kStatsTimer = 1;
 
 enum ControlId : int {
@@ -38,6 +41,8 @@ enum ControlId : int {
     ID_SHOW_VIDEO,
     ID_ROTATE,
     ID_LOG,
+    ID_DISP_BR,
+    ID_CAST_BR,
 };
 
 HINSTANCE g_instance;
@@ -60,9 +65,10 @@ bool g_penOk = false;
 std::vector<MonitorInfo> g_monitors;
 std::vector<std::wstring> g_comboDevices;  // 펜 모니터 콤보 항목별 값 (장치 이름 또는 kVddChoice)
 constexpr wchar_t kVddChoice[] = L"VDD";   // 가상 모니터를 필요할 때만 켜는 자동 모드
-bool g_vddInstalled = false;
-ULONGLONG g_vddOnRequestedAt = 0;
+VddState g_vdd;
+bool g_vddBusy = false;           // 켜고 끄는 중 (작업 스레드)
 ULONGLONG g_vddUnneededSince = 0;
+ULONGLONG g_vddLastToggle = 0;
 ULONGLONG g_lastMonitorRefresh = 0;
 std::wstring g_screenDevice;  // 화면 보내기가 지금 캡처 중인 모니터
 std::wstring g_linkStatus = L"연결 안 함";
@@ -154,6 +160,8 @@ void ReadUi() {
     g_settings.asioVolume = ItemInt(ID_ASIO_VOL, g_settings.asioVolume);
     g_settings.discordBufferMs = ItemInt(ID_DISC_BUF, g_settings.discordBufferMs);
     g_settings.discordVolume = ItemInt(ID_DISC_VOL, g_settings.discordVolume);
+    g_settings.displayBitrateMbps = std::clamp(ItemInt(ID_DISP_BR, g_settings.displayBitrateMbps), 5, 200);
+    g_settings.broadcastBitrateMbps = std::clamp(ItemInt(ID_CAST_BR, g_settings.broadcastBitrateMbps), 2, 100);
 }
 
 std::wstring MonitorLabel(const MonitorInfo& m) {
@@ -191,9 +199,8 @@ void SetVddOwned(bool owned) {
 
 void FillMonitors() {
     g_monitors = ListMonitors();
-    std::vector<std::wstring> vdds = VddMonitorDevices();
-    for (auto& m : g_monitors) m.vdd = std::find(vdds.begin(), vdds.end(), m.device) != vdds.end();
-    g_vddInstalled = !vdds.empty() || VddInstalled();
+    g_vdd = VddQuery();
+    for (auto& m : g_monitors) m.vdd = g_vdd.active && m.device == g_vdd.device;
     // 예전에 VDD 모니터를 이름으로 골라 뒀으면 자동 모드로 바꾼다 (켤 때마다 이름이 바뀔 수 있음)
     for (const auto& m : g_monitors)
         if (m.vdd && m.device == g_settings.penMonitor) g_settings.penMonitor = kVddChoice;
@@ -202,11 +209,11 @@ void FillMonitors() {
     HWND combo = Item(ID_PEN_MON);
     SendMessageW(combo, CB_RESETCONTENT, 0, 0);
     g_comboDevices.clear();
-    if (g_vddInstalled) {
+    if (g_vdd.installed) {
         const MonitorInfo* v = CurrentVdd();
-        std::wstring label = v ? Format(L"가상 모니터 (VDD) · %ldx%ld · 자동 켜기/끄기", v->rect.right - v->rect.left,
+        std::wstring label = v ? Format(L"가상 모니터 (VDD) · %ldx%ld · 펜 모드 동안 켜짐", v->rect.right - v->rect.left,
                                         v->rect.bottom - v->rect.top)
-                               : std::wstring(L"가상 모니터 (VDD) · 꺼짐 · 필요할 때 자동으로 켬");
+                               : std::wstring(L"가상 모니터 (VDD) · 꺼짐 · 펜 모드를 열면 켜짐");
         SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         g_comboDevices.push_back(kVddChoice);
     }
@@ -225,7 +232,14 @@ void FillMonitors() {
     }
     if (pick < 0 && !g_comboDevices.empty()) pick = 0;
     SendMessageW(combo, CB_SETCURSEL, pick, 0);
+
+    // VDD 자동 모드는 화면 보내기가 전제라 체크를 고정한다
+    bool vddMode = g_settings.penMonitor == kVddChoice;
+    SendMessageW(Item(ID_DISPLAY), BM_SETCHECK, vddMode || g_settings.display ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(Item(ID_DISPLAY), !vddMode);
 }
+
+bool DisplayWanted() { return g_settings.display != 0 || g_settings.penMonitor == kVddChoice; }
 
 void SendPenConfig() {
     RECT r = g_pen.Target();
@@ -255,7 +269,7 @@ void ApplyPen() {
 // 펜 채널이 연결돼 있고 '화면 보내기'가 켜져 있으면 펜 모니터를 iPad로 보낸다
 void UpdateScreenSender(bool restart) {
     const MonitorInfo* target = ChosenMonitor();
-    bool want = g_settings.display != 0 && g_penLink.connected && target;
+    bool want = DisplayWanted() && g_penLink.connected && target;
     if (g_screen.Running() && (!want || restart || target->device != g_screenDevice)) {
         g_screen.Stop();
         g_screenDevice.clear();
@@ -266,9 +280,11 @@ void UpdateScreenSender(bool restart) {
     c.device = target->device;
     g_screenDevice = c.device;
     c.bitrateMbps = g_settings.displayBitrateMbps;
-    c.fps = g_settings.displayFps;
-    g_screen.Start(c, [](const uint8_t* data, size_t size, bool key) {
-        g_penLink.Send(wire::kVideoFrame, data, size, key ? 1 : 0);
+    c.hevc = g_settings.displayCodec != L"h264";
+    // flags: bit0 = 키프레임, bit1 = HEVC
+    uint8_t codecFlag = c.hevc ? 2 : 0;
+    g_screen.Start(c, [codecFlag](const uint8_t* data, size_t size, bool key) {
+        g_penLink.Send(wire::kVideoFrame, data, size, uint8_t((key ? 1 : 0) | codecFlag));
     });
 }
 
@@ -283,6 +299,11 @@ void ApplyAudio() {
     c.discordVolume = g_settings.discordVolume;
     c.asioDspBuffer = g_settings.asioDspBuffer;
     g_audio.Apply(c);
+}
+
+void SendBroadcastConfig() {
+    std::string json = "{\"bitrate\":" + std::to_string(g_settings.broadcastBitrateMbps * 1000000) + "}";
+    g_receiver.Send(wire::kControl, json);
 }
 
 void ToggleConnect() {
@@ -305,6 +326,7 @@ void ToggleConnect() {
         if (g_videoOk) g_videoPipe.Push(std::move(data), key, orientation, pts);
     };
     cb.onAudio = [](const int16_t* pcm, size_t frames, int rate) { g_audio.Push(pcm, frames, rate); };
+    cb.onConnected = [] { SendBroadcastConfig(); };
     cb.onStatus = [](const std::wstring& status) {
         auto* copy = new std::wstring(status);
         if (!PostMessageW(g_main, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(copy))) delete copy;
@@ -342,48 +364,32 @@ std::wstring OutputLine(const wchar_t* label, const AudioOutputStats& s) {
                   s.fillMs, s.correctionPct, s.drained, s.late, s.skips);
 }
 
-// 가상 모니터(VDD)는 iPad 펜 모드가 연결돼 화면을 보낼 때만 켠다. 끊기고 10초가 지나면
-// (잠깐 끊긴 건 무시) 끈다. 끄는 건 '자동'을 골랐을 때와 PadLink가 켠 게 남아 있을 때뿐이다.
+// 가상 모니터(VDD) 자동 모드: 기본은 꺼 두고, iPad 펜 모드가 연결되면 켠다. 펜 모드가 끊기고
+// 5초가 지나면(잠깐 끊긴 건 무시) 끈다. 다른 모니터를 골랐으면 PadLink가 켠 게 남았을 때만 끈다.
 void VddTick() {
-    if (!g_vddInstalled) return;
+    if (!g_vdd.installed || g_vddBusy) return;
+    bool autoMode = g_settings.penMonitor == kVddChoice;
+    if (!autoMode && !g_settings.vddOwned) return;
     ULONGLONG now = GetTickCount64();
-    bool want = g_settings.penMonitor == kVddChoice && g_settings.display != 0 && g_penLink.connected;
-    bool present = CurrentVdd() != nullptr;
-    if (want) {
-        g_vddUnneededSince = 0;
-        if (!present) {
-            if (now - g_vddOnRequestedAt > 20000) {
-                g_vddOnRequestedAt = now;
-                SetVddOwned(true);
-                Log(L"VDD: 가상 모니터 켜는 중");
-                VddSetDisplayCountAsync(std::max(1, g_settings.vddCount));
-            }
-            // 화면 변경 알림을 놓쳐도 켜진 걸 알아채게 가끔 다시 본다
-            if (now - g_lastMonitorRefresh > 2000) {
-                FillMonitors();
-                if (CurrentVdd()) {
-                    ApplyPen();
-                    UpdateScreenSender(false);
-                }
-            }
-        }
-        return;
-    }
-    if (!present) {
-        g_vddUnneededSince = 0;
-        if (g_settings.vddOwned && now - g_vddOnRequestedAt > 20000) SetVddOwned(false);
-        return;
-    }
-    // 다른 모니터를 골랐으면 사용자가 직접 켠 VDD는 건드리지 않는다
-    if (g_settings.penMonitor != kVddChoice && !g_settings.vddOwned) return;
-    if (!g_vddUnneededSince) {
-        g_vddUnneededSince = now;
-    } else if (now - g_vddUnneededSince > 10000) {
-        Log(L"VDD: 쓰지 않아서 가상 모니터를 끄는 중");
-        VddSetDisplayCountAsync(0);
-        SetVddOwned(false);
-        g_vddUnneededSince = 0;
-    }
+    bool want = autoMode && g_penLink.connected;
+    if (want) g_vddUnneededSince = 0;
+    else if (!g_vddUnneededSince) g_vddUnneededSince = now;
+
+    bool turnOn = want && !g_vdd.active;
+    bool turnOff = !want && g_vdd.active && now - g_vddUnneededSince > 5000;
+    if (!want && !g_vdd.active) SetVddOwned(false);
+    if (!turnOn && !turnOff) return;
+    if (now - g_vddLastToggle < 3000) return;  // 방금 바꿨으면 화면이 자리 잡을 때까지 기다린다
+    g_vddLastToggle = now;
+    g_vddBusy = true;
+    Log(turnOn ? L"VDD: 가상 모니터 켜는 중" : L"VDD: 쓰지 않아서 가상 모니터 끄는 중");
+    // 디스플레이 구성 변경은 화면이 다시 잡힐 때까지 막히므로 작업 스레드에서
+    std::thread([turnOn] {
+        std::wstring error;
+        bool ok = VddSetActive(turnOn, error);
+        auto* e = ok ? nullptr : new std::wstring(error);
+        if (!PostMessageW(g_main, WM_APP_VDD_DONE, turnOn ? 1 : 0, reinterpret_cast<LPARAM>(e))) delete e;
+    }).detach();
 }
 
 void UpdateStatus() {
@@ -415,7 +421,7 @@ void UpdateStatus() {
     }
     std::wstring screenLine = L"화면 보내기: ";
     uint64_t screenBytes = g_screen.bytes.load(), screenFrames = g_screen.frames.load();
-    if (!g_settings.display) {
+    if (!DisplayWanted()) {
         screenLine += L"꺼짐 (켜면 iPad가 액정타블렛)";
     } else if (!g_screen.Running()) {
         screenLine += g_penLink.connected && g_settings.penMonitor == kVddChoice
@@ -424,9 +430,10 @@ void UpdateStatus() {
     } else if (std::wstring e = g_screen.Error(); !e.empty()) {
         screenLine += e;
     } else {
-        screenLine += Format(L"%dx%d · %.0ffps · %.1fMbps", g_screen.width.load(), g_screen.height.load(),
+        screenLine += Format(L"%dx%d · %.0ffps · %.1fMbps · %ls", g_screen.width.load(), g_screen.height.load(),
                              dt > 0 ? (screenFrames - g_lastScreenFrames) / dt : 0,
-                             dt > 0 ? (screenBytes - g_lastScreenBytes) * 8 / dt / 1e6 : 0);
+                             dt > 0 ? (screenBytes - g_lastScreenBytes) * 8 / dt / 1e6 : 0,
+                             g_settings.displayCodec == L"h264" ? L"H.264" : L"HEVC");
     }
     g_lastScreenBytes = screenBytes;
     g_lastScreenFrames = screenFrames;
@@ -490,14 +497,25 @@ void CreateControls() {
     Control(L"BUTTON", L"iPad에 화면 보내기 (액정타블렛)", BS_AUTOCHECKBOX | WS_TABSTOP, 474, y, 238, 26, ID_DISPLAY);
     SendMessageW(Item(ID_DISPLAY), BM_SETCHECK, g_settings.display ? BST_CHECKED : BST_UNCHECKED, 0);
 
+    y += 34;
+    Control(L"STATIC", L"액정타블렛 화질", SS_LEFT, 12, y + 4, 150, 20, -1);
+    Control(L"EDIT", std::to_wstring(g_settings.displayBitrateMbps).c_str(), ES_NUMBER | WS_TABSTOP, 166, y + 1, 48, 24,
+            ID_DISP_BR, WS_EX_CLIENTEDGE);
+    Control(L"STATIC", L"Mbps · 60fps 고정", SS_LEFT, 220, y + 4, 140, 20, -1);
+    Control(L"STATIC", L"송출 화질", SS_RIGHT, 370, y + 4, 100, 20, -1);
+    Control(L"EDIT", std::to_wstring(g_settings.broadcastBitrateMbps).c_str(), ES_NUMBER | WS_TABSTOP, 474, y + 1, 48,
+            24, ID_CAST_BR, WS_EX_CLIENTEDGE);
+    Control(L"STATIC", L"Mbps (적용을 누르면 바로 바뀜)", SS_LEFT, 528, y + 4, 184, 20, -1);
+
     y += 40;
     Control(L"STATIC",
             L"디스코드에서는 'PadLink 화면' 창을 공유하세요(디스코드용 출력은 내가 안 듣는 장치로, 이 앱 음소거 금지). "
-            L"펜: 스퀴즈 = Space, 더블탭 = E/P (ini에서 변경). 클립 스튜디오 태블릿 설정은 TabletPC.",
+            L"펜: 스퀴즈 = Space, 더블탭 = E/P (ini에서 변경). 클립 스튜디오 태블릿 설정은 TabletPC. "
+            L"iPad에서 펜 모드와 송출은 하나만 켜집니다.",
             SS_LEFT, 12, y, 700, 40, -1);
 
     y += 46;
-    Control(L"BUTTON", L"오디오 적용", BS_PUSHBUTTON | WS_TABSTOP, 12, y, 110, 28, ID_APPLY);
+    Control(L"BUTTON", L"적용", BS_PUSHBUTTON | WS_TABSTOP, 12, y, 110, 28, ID_APPLY);
     Control(L"BUTTON", L"화면 창 보이기", BS_PUSHBUTTON | WS_TABSTOP, 130, y, 120, 28, ID_SHOW_VIDEO);
     Control(L"BUTTON", L"화면 90° 회전", BS_PUSHBUTTON | WS_TABSTOP, 258, y, 120, 28, ID_ROTATE);
 
@@ -510,7 +528,7 @@ void InitAudioUi() {
     std::wstring error;
     if (!g_audio.Load(error)) {
         Log(error);
-        for (int id : {ID_ASIO, ID_DISC, ID_APPLY}) EnableWindow(Item(id), FALSE);
+        for (int id : {ID_ASIO, ID_DISC}) EnableWindow(Item(id), FALSE);
         return;
     }
     auto asioNames = g_audio.Drivers(true);
@@ -533,11 +551,18 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_CONNECT:
             ToggleConnect();
             return 0;
-        case ID_APPLY:
+        case ID_APPLY: {
+            int oldDisplay = g_settings.displayBitrateMbps;
             ReadUi();
             SaveSettings(g_settings);
             ApplyAudio();
+            if (g_settings.displayBitrateMbps != oldDisplay && g_screen.Running()) {
+                Log(Format(L"액정타블렛 화질 %dMbps로 다시 시작", g_settings.displayBitrateMbps));
+                UpdateScreenSender(true);
+            }
+            if (g_receiver.connected) SendBroadcastConfig();
             return 0;
+        }
         case ID_SHOW_VIDEO:
             ShowWindow(g_video, SW_SHOWNORMAL);
             SetForegroundWindow(g_video);
@@ -555,6 +580,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         case ID_DISPLAY:
+            if (g_settings.penMonitor == kVddChoice) return 0;
             g_settings.display = SendMessageW(Item(ID_DISPLAY), BM_GETCHECK, 0, 0) == BST_CHECKED ? 1 : 0;
             SaveSettings(g_settings);
             UpdateScreenSender(false);
@@ -572,6 +598,21 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UpdateScreenSender(false);
         VddTick();
         return 0;
+    case WM_APP_VDD_DONE: {
+        std::unique_ptr<std::wstring> error(reinterpret_cast<std::wstring*>(lp));
+        g_vddBusy = false;
+        bool on = wp == 1;
+        if (error) {
+            Log(L"VDD: " + *error);
+        } else {
+            Log(on ? L"VDD: 가상 모니터 켬" : L"VDD: 가상 모니터 끔");
+            SetVddOwned(on);
+        }
+        FillMonitors();
+        ApplyPen();
+        UpdateScreenSender(false);
+        return 0;
+    }
     case WM_TIMER:
         if (wp == kStatsTimer) {
             VddTick();
@@ -598,9 +639,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         KillTimer(hwnd, kStatsTimer);
         g_screen.Stop();
-        if ((g_settings.vddOwned || g_settings.penMonitor == kVddChoice) && CurrentVdd()) {
+        if ((g_settings.vddOwned || g_settings.penMonitor == kVddChoice) && VddQuery().active) {
             std::wstring error;
-            if (VddSetDisplayCount(0, error)) Log(L"VDD: 종료하면서 가상 모니터를 끔");
+            if (VddSetActive(false, error)) Log(L"VDD: 종료하면서 가상 모니터를 끔");
             else Log(L"VDD: " + error);
         }
         SetVddOwned(false);
@@ -682,7 +723,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&vc);
 
     DWORD mainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(724), S(644)};
+    RECT rc{0, 0, S(724), S(678)};
     AdjustWindowRect(&rc, mainStyle, FALSE);
     g_main = CreateWindowExW(0, L"PadLinkMain", L"PadLink 수신", mainStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                              rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
@@ -700,8 +741,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     std::wstring penError;
     g_penOk = g_pen.Init(penError);
     if (!g_penOk) Log(penError);
+    VddRepairConfig();
     FillMonitors();
     ApplyPen();
+    // 기본은 꺼 둔다: 자동 모드인데 켜져 있으면 바로 끈다
+    if ((g_settings.penMonitor == kVddChoice || g_settings.vddOwned) && g_vdd.active) {
+        g_vddUnneededSince = 1;
+        VddTick();
+    }
 
     InitAudioUi();
     ShowWindow(g_main, show);

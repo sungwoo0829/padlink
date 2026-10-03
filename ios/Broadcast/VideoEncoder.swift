@@ -48,6 +48,16 @@ final class VideoEncoder {
         queue.async { self.keyframeRequested = true }
     }
 
+    /// PC에서 송출 화질을 바꾸면 인코더를 다시 만들지 않고 바로 적용한다
+    func setBitrate(_ value: Int) {
+        queue.async {
+            self.bitrate = value
+            if let session = self.session {
+                VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: NSNumber(value: value))
+            }
+        }
+    }
+
     func encode(_ pixelBuffer: CVPixelBuffer, pts: CMTime, orientation: UInt8) {
         queue.sync { encodeLocked(pixelBuffer, pts: pts, orientation: orientation) }
     }
