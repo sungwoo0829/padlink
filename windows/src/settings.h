@@ -13,6 +13,8 @@ struct Settings {
     int discordVolume = 100;
     int asioDspBuffer = 256;
     int rotation = 0;  // 사용자가 추가로 돌린 90도 단위 횟수
+    int videoBorderless = 0;  // 'PadLink 화면' 창 테두리 없이
+    int videoX = 0, videoY = 0, videoW = 0, videoH = 0;  // 그 창의 화면 영역(클라이언트) 위치·크기, w=0이면 기본
 
     std::wstring penMonitor;              // \\.\DISPLAY1 형식, 비어 있으면 주 모니터
     std::wstring squeezeKeys = L"SPACE";  // 클립 스튜디오: 누르는 동안 손 도구

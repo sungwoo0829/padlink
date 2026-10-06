@@ -121,6 +121,15 @@ int VideoPipeline::RotateUser() {
     return r;
 }
 
+void VideoPipeline::RequestSnapshot(SnapshotCallback callback) {
+    {
+        std::lock_guard lock(snapshotMutex_);
+        snapshotCallback_ = std::move(callback);
+    }
+    snapshotRequested_ = true;
+    cv_.notify_one();
+}
+
 void VideoPipeline::ToggleRange() {
     rangeFlip_ = !rangeFlip_;
     RequestRedraw();
@@ -136,8 +145,9 @@ void VideoPipeline::Thread() {
         bool havePacket = false;
         {
             std::unique_lock lock(mutex_);
-            cv_.wait_for(lock, std::chrono::milliseconds(200),
-                         [this] { return stop_ || !queue_.empty() || redraw_.load(); });
+            cv_.wait_for(lock, std::chrono::milliseconds(200), [this] {
+                return stop_ || !queue_.empty() || redraw_.load() || snapshotRequested_.load();
+            });
             if (stop_) break;
             if (!queue_.empty()) {
                 packet = std::move(queue_.front());
@@ -156,6 +166,7 @@ void VideoPipeline::Thread() {
             if (lastSample_) Render();
             else ClearBlack();
         }
+        if (snapshotRequested_.exchange(false)) DoSnapshot();
     }
 
     lastSample_.Reset();
@@ -402,18 +413,9 @@ ID3D11VideoProcessorInputView* VideoPipeline::GetInputView(ID3D11Texture2D* text
 
 void VideoPipeline::Render() {
     if (!lastSample_ || swapW_ == 0 || swapH_ == 0) return;
-    ComPtr<IMFMediaBuffer> buffer;
-    ComPtr<IMFDXGIBuffer> dxgiBuffer;
     ComPtr<ID3D11Texture2D> texture;
     UINT slice = 0;
-    if (FAILED(lastSample_->GetBufferByIndex(0, &buffer)) || FAILED(buffer.As(&dxgiBuffer)) ||
-        FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(&texture))) || FAILED(dxgiBuffer->GetSubresourceIndex(&slice))) {
-        if (!warnedSoftware_) {
-            warnedSoftware_ = true;
-            Log(L"디코더가 GPU 텍스처를 주지 않음 (하드웨어 디코딩 아님) — 화면을 그릴 수 없음");
-        }
-        return;
-    }
+    if (!CurrentFrame(texture, slice)) return;
     D3D11_TEXTURE2D_DESC td{};
     texture->GetDesc(&td);
     if (!EnsureProcessor(td.Width, td.Height)) return;
@@ -428,6 +430,8 @@ void VideoPipeline::Render() {
     float cw = float(src.right - src.left), ch = float(src.bottom - src.top);
     if (turns & 1) std::swap(cw, ch);
     if (cw <= 0 || ch <= 0) return;
+    shownWidth = int(cw);
+    shownHeight = int(ch);
     float scale = std::min(swapW_ / cw, swapH_ / ch);
     LONG dw = LONG(cw * scale), dh = LONG(ch * scale);
     RECT dst{LONG(swapW_ - dw) / 2, LONG(swapH_ - dh) / 2, 0, 0};
@@ -463,6 +467,140 @@ void VideoPipeline::Render() {
         return;
     }
     swap_->Present(1, 0);
+}
+
+bool VideoPipeline::CurrentFrame(ComPtr<ID3D11Texture2D>& texture, UINT& slice) {
+    ComPtr<IMFMediaBuffer> buffer;
+    ComPtr<IMFDXGIBuffer> dxgiBuffer;
+    if (!lastSample_ || FAILED(lastSample_->GetBufferByIndex(0, &buffer)) || FAILED(buffer.As(&dxgiBuffer)) ||
+        FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(&texture))) || FAILED(dxgiBuffer->GetSubresourceIndex(&slice))) {
+        if (lastSample_ && !warnedSoftware_) {
+            warnedSoftware_ = true;
+            Log(L"디코더가 GPU 텍스처를 주지 않음 (하드웨어 디코딩 아님) — 화면을 그릴 수 없음");
+        }
+        return false;
+    }
+    return true;
+}
+
+// 화면에 보이는 것과 같은 방향·색으로, 잘라낸 원본 크기 그대로 BGRA 텍스처에 그려서 읽어 온다
+void VideoPipeline::DoSnapshot() {
+    SnapshotCallback callback;
+    {
+        std::lock_guard lock(snapshotMutex_);
+        callback = std::move(snapshotCallback_);
+        snapshotCallback_ = nullptr;
+    }
+    if (!callback) return;
+    std::vector<uint8_t> pixels;
+    int outW = 0, outH = 0;
+    ComPtr<ID3D11Texture2D> texture;
+    UINT slice = 0;
+    if (!CurrentFrame(texture, slice)) {
+        callback(std::move(pixels), 0, 0);
+        return;
+    }
+    D3D11_TEXTURE2D_DESC td{};
+    texture->GetDesc(&td);
+    RECT src = crop_;
+    src.right = std::min<LONG>(src.right, (LONG)td.Width);
+    src.bottom = std::min<LONG>(src.bottom, (LONG)td.Height);
+    UINT cw = UINT(src.right - src.left), ch = UINT(src.bottom - src.top);
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd{};
+    cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    cd.InputFrameRate = {60, 1};
+    cd.InputWidth = td.Width;
+    cd.InputHeight = td.Height;
+    cd.OutputFrameRate = {60, 1};
+    cd.OutputWidth = std::max(cw, ch);
+    cd.OutputHeight = std::max(cw, ch);
+    cd.Usage = D3D11_VIDEO_USAGE_OPTIMAL_QUALITY;
+    ComPtr<ID3D11VideoProcessorEnumerator> en;
+    ComPtr<ID3D11VideoProcessor> vp;
+    HRESULT hr = videoDevice_->CreateVideoProcessorEnumerator(&cd, &en);
+    if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessor(en.Get(), 0, &vp);
+    if (FAILED(hr)) {
+        Log(Format(L"복사용 변환기 생성 실패 0x%08X", (unsigned)hr));
+        callback(std::move(pixels), 0, 0);
+        return;
+    }
+    D3D11_VIDEO_PROCESSOR_CAPS caps{};
+    en->GetVideoProcessorCaps(&caps);
+    bool rotate = (caps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION) != 0;
+    int turns = rotate ? (OrientationToTurns(orientation_) + userRotation_) & 3 : 0;
+    outW = int(turns & 1 ? ch : cw);
+    outH = int(turns & 1 ? cw : ch);
+
+    D3D11_TEXTURE2D_DESC od{};
+    od.Width = UINT(outW);
+    od.Height = UINT(outH);
+    od.MipLevels = 1;
+    od.ArraySize = 1;
+    od.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    od.SampleDesc.Count = 1;
+    od.Usage = D3D11_USAGE_DEFAULT;
+    od.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ComPtr<ID3D11Texture2D> target, staging;
+    hr = device_->CreateTexture2D(&od, nullptr, &target);
+    od.Usage = D3D11_USAGE_STAGING;
+    od.BindFlags = 0;
+    od.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (SUCCEEDED(hr)) hr = device_->CreateTexture2D(&od, nullptr, &staging);
+
+    ComPtr<ID3D11VideoProcessorInputView> inView;
+    ComPtr<ID3D11VideoProcessorOutputView> outView;
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{};
+    iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    iv.Texture2D.ArraySlice = slice;
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{};
+    ov.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessorInputView(texture.Get(), en.Get(), &iv, &inView);
+    if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessorOutputView(target.Get(), en.Get(), &ov, &outView);
+    if (FAILED(hr)) {
+        Log(Format(L"복사용 화면 준비 실패 0x%08X", (unsigned)hr));
+        callback(std::move(pixels), 0, 0);
+        return;
+    }
+
+    RECT dst{0, 0, outW, outH};
+    videoContext_->VideoProcessorSetStreamAutoProcessingMode(vp.Get(), 0, FALSE);
+    videoContext_->VideoProcessorSetStreamFrameFormat(vp.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+    videoContext_->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &src);
+    videoContext_->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &dst);
+    videoContext_->VideoProcessorSetOutputTargetRect(vp.Get(), TRUE, &dst);
+    if (rotate) videoContext_->VideoProcessorSetStreamRotation(vp.Get(), 0, turns != 0, (D3D11_VIDEO_PROCESSOR_ROTATION)turns);
+    bool full255 = fullRange_ != rangeFlip_.load();
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE inSpace{};
+    inSpace.YCbCr_Matrix = 1;
+    inSpace.Nominal_Range = full255 ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+    videoContext_->VideoProcessorSetStreamColorSpace(vp.Get(), 0, &inSpace);
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE outSpace{};
+    videoContext_->VideoProcessorSetOutputColorSpace(vp.Get(), &outSpace);
+    D3D11_VIDEO_PROCESSOR_STREAM stream{};
+    stream.Enable = TRUE;
+    stream.pInputSurface = inView.Get();
+    hr = videoContext_->VideoProcessorBlt(vp.Get(), outView.Get(), 0, 1, &stream);
+    if (FAILED(hr)) {
+        Log(Format(L"복사용 화면 변환 실패 0x%08X", (unsigned)hr));
+        callback(std::move(pixels), 0, 0);
+        return;
+    }
+    context_->CopyResource(staging.Get(), target.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+        callback(std::move(pixels), 0, 0);
+        return;
+    }
+    const size_t rowBytes = size_t(outW) * 4;
+    pixels.resize(rowBytes * size_t(outH));
+    for (int y = 0; y < outH; ++y) {
+        const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + size_t(y) * mapped.RowPitch;
+        std::memcpy(pixels.data() + size_t(y) * rowBytes, row, rowBytes);
+    }
+    context_->Unmap(staging.Get(), 0);
+    for (size_t i = 3; i < pixels.size(); i += 4) pixels[i] = 255;  // 알파는 불투명으로
+    callback(std::move(pixels), outW, outH);
 }
 
 void VideoPipeline::ClearBlack() {

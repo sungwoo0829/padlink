@@ -1,6 +1,7 @@
 #include "common.h"
 
 #include <commctrl.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <memory>
@@ -8,6 +9,7 @@
 #include <objbase.h>
 
 #include "audio.h"
+#include "clipboard.h"
 #include "log.h"
 #include "net.h"
 #include "pen.h"
@@ -20,7 +22,19 @@ namespace {
 constexpr UINT WM_APP_LOG = WM_APP + 1;
 constexpr UINT WM_APP_STATUS = WM_APP + 2;
 constexpr UINT WM_APP_PEN_LINK = WM_APP + 3;  // wParam 1 = 펜 연결됨, 0 = 끊김
-constexpr UINT WM_APP_VDD_DONE = WM_APP + 4;  // wParam 1 = 켬, lParam = new std::wstring* 오류(없으면 nullptr)
+constexpr UINT WM_APP_VDD_DONE = WM_APP + 4;
+constexpr UINT WM_APP_SNAPSHOT = WM_APP + 5;  // lParam = new Snapshot*
+
+// 'PadLink 화면' 창 우클릭 메뉴
+enum VideoMenuId : int { IDM_COPY = 2001, IDM_BORDERLESS, IDM_FIT, IDM_ROTATE, IDM_RANGE, IDM_HIDE };
+
+struct Snapshot {
+    std::vector<uint8_t> pixels;
+    int width = 0;
+    int height = 0;
+};
+
+void SaveVideoPlacement();  // wParam 1 = 켬, lParam = new std::wstring* 오류(없으면 nullptr)
 constexpr UINT_PTR kStatsTimer = 1;
 
 enum ControlId : int {
@@ -647,6 +661,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetVddOwned(false);
         LogSetWindow(nullptr, 0);
         ReadUi();
+        SaveVideoPlacement();
         SaveSettings(g_settings);
         g_screen.Stop();
         g_receiver.Stop();
@@ -660,8 +675,171 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---- 'PadLink 화면' 창: 테두리 없이, 영상 비율 맞추기, 복사하기 ----
+
+DWORD VideoStyle(bool borderless) { return borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW; }
+
+// 창 안쪽(영상이 그려지는 영역)의 화면 좌표
+RECT VideoClientOnScreen() {
+    RECT rc{};
+    GetClientRect(g_video, &rc);
+    POINT topLeft{0, 0};
+    ClientToScreen(g_video, &topLeft);
+    return RECT{topLeft.x, topLeft.y, topLeft.x + rc.right, topLeft.y + rc.bottom};
+}
+
+// 창 안쪽이 client(화면 좌표)가 되도록 창을 옮긴다
+void PlaceVideoClient(RECT client, bool borderless) {
+    AdjustWindowRectExForDpi(&client, VideoStyle(borderless), FALSE, 0, GetDpiForWindow(g_video));
+    SetWindowPos(g_video, nullptr, client.left, client.top, client.right - client.left, client.bottom - client.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+void SaveVideoPlacement() {
+    if (!g_video || IsIconic(g_video) || IsZoomed(g_video)) return;
+    RECT rc = VideoClientOnScreen();
+    if (rc.right - rc.left < 100 || rc.bottom - rc.top < 100) return;
+    g_settings.videoX = rc.left;
+    g_settings.videoY = rc.top;
+    g_settings.videoW = rc.right - rc.left;
+    g_settings.videoH = rc.bottom - rc.top;
+}
+
+// 높이는 두고 너비를 영상 비율에 맞춘다 → 검은 여백이 없어진다. 화면을 넘으면 줄인다.
+void FitVideoToAspect() {
+    int vw = g_videoPipe.shownWidth.load(), vh = g_videoPipe.shownHeight.load();
+    if (vw <= 0 || vh <= 0) {
+        Log(L"아직 받은 화면이 없어 비율을 맞출 수 없음");
+        return;
+    }
+    if (IsZoomed(g_video)) ShowWindow(g_video, SW_RESTORE);
+    RECT c = VideoClientOnScreen();
+    int h = c.bottom - c.top;
+    int w = MulDiv(h, vw, vh);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(g_video, MONITOR_DEFAULTTONEAREST), &mi);
+    int maxW = mi.rcWork.right - mi.rcWork.left, maxH = mi.rcWork.bottom - mi.rcWork.top;
+    if (w > maxW) {
+        w = maxW;
+        h = MulDiv(w, vh, vw);
+    }
+    if (h > maxH) {
+        h = maxH;
+        w = MulDiv(h, vw, vh);
+    }
+    PlaceVideoClient(RECT{c.left, c.top, c.left + w, c.top + h}, g_settings.videoBorderless != 0);
+    SaveVideoPlacement();
+    SaveSettings(g_settings);
+}
+
+// 테두리 없이: 스크린샷·디스코드 창 공유에 제목 표시줄과 테두리가 안 들어간다.
+// 켤 때 영상 비율에 맞춰 검은 여백도 없앤다. 드래그로 옮기고 가장자리로 크기를 바꾼다.
+void SetVideoBorderless(bool on) {
+    if (IsZoomed(g_video)) ShowWindow(g_video, SW_RESTORE);
+    RECT client = VideoClientOnScreen();
+    g_settings.videoBorderless = on ? 1 : 0;
+    bool visible = (GetWindowLongPtrW(g_video, GWL_STYLE) & WS_VISIBLE) != 0;
+    SetWindowLongPtrW(g_video, GWL_STYLE, LONG_PTR(VideoStyle(on) | (visible ? WS_VISIBLE : 0)));
+    PlaceVideoClient(client, on);
+    if (on) FitVideoToAspect();
+    SaveVideoPlacement();
+    SaveSettings(g_settings);
+}
+
+// 창 크기·검은 여백과 상관없이 iPad 화면을 원본 해상도로 클립보드에 넣는다
+void CopyVideoFrame() {
+    if (!g_videoOk) return;
+    g_videoPipe.RequestSnapshot([](std::vector<uint8_t>&& pixels, int width, int height) {
+        auto* snap = new Snapshot{std::move(pixels), width, height};
+        if (!PostMessageW(g_video, WM_APP_SNAPSHOT, 0, reinterpret_cast<LPARAM>(snap))) delete snap;
+    });
+}
+
+void ShowVideoMenu(HWND hwnd, LPARAM lp) {
+    POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    if (pt.x == -1 && pt.y == -1) {  // 키보드(메뉴 키)로 열었을 때
+        RECT rc = VideoClientOnScreen();
+        pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
+    }
+    bool borderless = g_settings.videoBorderless != 0;
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, IDM_COPY, L"복사하기\tCtrl+C");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (borderless ? MF_CHECKED : MF_UNCHECKED), IDM_BORDERLESS,
+                L"테두리 없이\tB · 더블클릭");
+    AppendMenuW(menu, MF_STRING, IDM_FIT, L"영상 비율에 맞추기 (검은 여백 없애기)\tF");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, IDM_ROTATE, L"90° 회전\tR");
+    AppendMenuW(menu, MF_STRING, IDM_RANGE, L"색 범위 바꾸기\tC");
+    AppendMenuW(menu, MF_STRING, IDM_HIDE, L"창 숨기기");
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+}
+
+void RotateVideo() {
+    g_settings.rotation = g_videoPipe.RotateUser();
+    SaveSettings(g_settings);
+}
+
 LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_NCHITTEST:
+        // 테두리가 없을 때도 가장자리를 잡아 크기를 바꿀 수 있게
+        if (g_settings.videoBorderless) {
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int b = S(6);
+            bool left = pt.x < b, right = pt.x >= rc.right - b, top = pt.y < b, bottom = pt.y >= rc.bottom - b;
+            if (top && left) return HTTOPLEFT;
+            if (top && right) return HTTOPRIGHT;
+            if (bottom && left) return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+            return HTCLIENT;
+        }
+        break;
+    case WM_LBUTTONDOWN:
+        // 테두리가 없으면 아무 데나 끌어서 옮긴다
+        if (g_settings.videoBorderless) {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+        return 0;
+    case WM_LBUTTONDBLCLK:
+        SetVideoBorderless(g_settings.videoBorderless == 0);
+        return 0;
+    case WM_CONTEXTMENU:
+        ShowVideoMenu(hwnd, lp);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case IDM_COPY: CopyVideoFrame(); break;
+        case IDM_BORDERLESS: SetVideoBorderless(g_settings.videoBorderless == 0); break;
+        case IDM_FIT: FitVideoToAspect(); break;
+        case IDM_ROTATE: RotateVideo(); break;
+        case IDM_RANGE: g_videoPipe.ToggleRange(); break;
+        case IDM_HIDE: ShowWindow(hwnd, SW_HIDE); break;
+        }
+        return 0;
+    case WM_APP_SNAPSHOT: {
+        std::unique_ptr<Snapshot> snap(reinterpret_cast<Snapshot*>(lp));
+        std::wstring error;
+        if (CopyImageToClipboard(hwnd, snap->pixels, snap->width, snap->height, error))
+            Log(Format(L"화면을 클립보드에 복사함 (%dx%d, PNG)", snap->width, snap->height));
+        else
+            Log(L"복사 실패: " + error);
+        return 0;
+    }
+    case WM_EXITSIZEMOVE:
+        SaveVideoPlacement();
+        SaveSettings(g_settings);
+        return 0;
     case WM_SIZE:
         if (g_videoOk) g_videoPipe.RequestRedraw();
         return 0;
@@ -675,12 +853,11 @@ LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         return 1;
     case WM_KEYDOWN:
-        if (wp == 'R') {
-            g_settings.rotation = g_videoPipe.RotateUser();
-            SaveSettings(g_settings);
-        } else if (wp == 'C') {
-            g_videoPipe.ToggleRange();
-        }
+        if (wp == 'C' && GetKeyState(VK_CONTROL) < 0) CopyVideoFrame();
+        else if (wp == 'C') g_videoPipe.ToggleRange();
+        else if (wp == 'B') SetVideoBorderless(g_settings.videoBorderless == 0);
+        else if (wp == 'F') FitVideoToAspect();
+        else if (wp == 'R') RotateVideo();
         return 0;
     case WM_CLOSE:
         // 창을 닫으면 디스코드 공유가 끊기니 숨기기만 한다
@@ -720,6 +897,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     vc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     vc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
     vc.lpszClassName = L"PadLinkVideo";
+    vc.style = CS_DBLCLKS;
     RegisterClassExW(&vc);
 
     DWORD mainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
@@ -732,10 +910,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     Log(L"PadLink 수신 시작");
 
     // iPad Air 11" 화면(2360x1640)의 절반 크기로 시작
-    RECT vr{0, 0, 1180, 820};
-    AdjustWindowRect(&vr, WS_OVERLAPPEDWINDOW, FALSE);
-    g_video = CreateWindowExW(0, L"PadLinkVideo", L"PadLink 화면", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                              vr.right - vr.left, vr.bottom - vr.top, nullptr, nullptr, instance, nullptr);
+    // 지난번 위치·크기·테두리 상태로 연다 (기본은 iPad 화면의 절반 크기)
+    bool borderless = g_settings.videoBorderless != 0;
+    DWORD videoStyle = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    RECT vr{100, 100, 100 + 1180, 100 + 820};
+    int vx = borderless ? 100 : CW_USEDEFAULT, vy = borderless ? 100 : CW_USEDEFAULT;
+    if (g_settings.videoW >= 100 && g_settings.videoH >= 100) {
+        RECT saved{g_settings.videoX, g_settings.videoY, g_settings.videoX + g_settings.videoW,
+                   g_settings.videoY + g_settings.videoH};
+        if (MonitorFromRect(&saved, MONITOR_DEFAULTTONULL)) {
+            vr = saved;
+            AdjustWindowRect(&vr, videoStyle, FALSE);
+            vx = vr.left;
+            vy = vr.top;
+        } else {
+            AdjustWindowRect(&vr, videoStyle, FALSE);
+        }
+    } else {
+        AdjustWindowRect(&vr, videoStyle, FALSE);
+    }
+    g_video = CreateWindowExW(0, L"PadLinkVideo", L"PadLink 화면", videoStyle, vx, vy, vr.right - vr.left,
+                              vr.bottom - vr.top, nullptr, nullptr, instance, nullptr);
     g_videoOk = g_videoPipe.Start(g_video, g_settings.rotation);
 
     std::wstring penError;

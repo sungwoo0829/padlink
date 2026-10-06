@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -23,9 +24,16 @@ public:
     int RotateUser();     // 90도 더 돌리고 새 값(0~3)을 돌려준다
     void ToggleRange();   // 색 범위(16-235 / 0-255) 수동 전환
 
+    // 지금 화면을 원본 해상도로(창 크기·검은 여백과 상관없이) BGRA로 뽑는다. 영상 스레드에서 콜백.
+    using SnapshotCallback = std::function<void(std::vector<uint8_t>&& bgra, int width, int height)>;
+    void RequestSnapshot(SnapshotCallback callback);
+
     std::wstring adapterName;
     std::atomic<int> width{0};
     std::atomic<int> height{0};
+    // 회전까지 반영해 화면에 보이는 영상 크기 (창을 영상 비율에 맞출 때 씀)
+    std::atomic<int> shownWidth{0};
+    std::atomic<int> shownHeight{0};
     std::atomic<uint64_t> decodedFrames{0};
 
 private:
@@ -49,6 +57,8 @@ private:
     void Drain();
     void Render();
     void ClearBlack();
+    void DoSnapshot();
+    bool CurrentFrame(ComPtr<ID3D11Texture2D>& texture, UINT& slice);
     void ApplyResize();
     bool EnsureProcessor(UINT inW, UINT inH);
     ID3D11VideoProcessorInputView* GetInputView(ID3D11Texture2D* texture, UINT slice);
@@ -88,4 +98,7 @@ private:
     bool waitKey_ = true;
     bool stop_ = false;
     std::atomic<bool> redraw_{true};
+    std::atomic<bool> snapshotRequested_{false};
+    std::mutex snapshotMutex_;
+    SnapshotCallback snapshotCallback_;
 };
