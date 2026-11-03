@@ -12,6 +12,8 @@ add_executable(PadLinkRecv WIN32
   src/log.cpp
   src/settings.cpp
   ../shared/plist.cpp
+  ../shared/replay.cpp
+  src/replay_writer.cpp
   src/usbmux.cpp
   src/net.cpp
   src/video.cpp
@@ -35,4 +37,4 @@ if(NOT EXISTS "${NVCODEC_INCLUDE_DIR}/nvEncodeAPI.h")
 endif()
 target_include_directories(PadLinkRecv PRIVATE "${NVCODEC_INCLUDE_DIR}")
 target_link_libraries(PadLinkRecv PRIVATE
-  ws2_32 d3d11 dxgi mfplat mfuuid wmcodecdspuuid strmiids comctl32 ole32 winmm cfgmgr32 windowscodecs)
+  ws2_32 d3d11 dxgi mfplat mfuuid wmcodecdspuuid strmiids comctl32 ole32 winmm cfgmgr32 windowscodecs mfreadwrite)

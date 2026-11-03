@@ -11,7 +11,7 @@
 enum class LinkMode { Usb = 0, Wifi = 1 };
 
 struct ReceiverCallbacks {
-    std::function<void(std::vector<uint8_t>&& annexB, bool key, uint8_t orientation)> onVideo;
+    std::function<void(std::vector<uint8_t>&& annexB, bool key, uint8_t orientation, uint64_t ptsUs)> onVideo;
     std::function<void(const int16_t* pcm, size_t frames, int sampleRate)> onAudio;
     std::function<void()> onConnected;  // 연결 직후 (Send 가능)
     std::function<void(const std::string& status)> onStatus;

@@ -177,7 +177,7 @@ void Receiver::ReadLoop(int fd) {
             break;
         case wire::kVideoFrame:
             ++videoFrames;
-            if (cb_.onVideo) cb_.onVideo(std::move(payload), (h.flags & 1) != 0, uint8_t(h.flags >> 4));
+            if (cb_.onVideo) cb_.onVideo(std::move(payload), (h.flags & 1) != 0, uint8_t(h.flags >> 4), h.pts);
             payload = {};
             break;
         case wire::kAudioPCM:

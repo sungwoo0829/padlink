@@ -29,6 +29,9 @@ struct Settings {
     int broadcastBitrateMbps = 20;       // iPad → PC 송출
     int vddCount = 1;  // 가상 모니터를 켤 때 개수
     int vddOwned = 0;  // PadLink가 켠 VDD가 아직 켜져 있음 (비정상 종료 뒤 정리용)
+
+    int replaySeconds = 30;                    // 하이라이트로 저장할 마지막 몇 초
+    std::wstring replayHotkey = L"CTRL+ALT+H";  // 어느 앱을 쓰는 중이든 저장하는 단축키
 };
 
 Settings LoadSettings();

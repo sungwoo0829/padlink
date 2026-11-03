@@ -1,9 +1,12 @@
 #include "common.h"
 
 #include <commctrl.h>
+#include <mfapi.h>
+#include <shellapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <thread>
 #include <objbase.h>
@@ -13,6 +16,8 @@
 #include "log.h"
 #include "net.h"
 #include "pen.h"
+#include "replay.h"
+#include "replay_writer.h"
 #include "screen.h"
 #include "settings.h"
 #include "vdd.h"
@@ -26,7 +31,8 @@ constexpr UINT WM_APP_VDD_DONE = WM_APP + 4;
 constexpr UINT WM_APP_SNAPSHOT = WM_APP + 5;  // lParam = new Snapshot*
 
 // 'PadLink 화면' 창 우클릭 메뉴
-enum VideoMenuId : int { IDM_COPY = 2001, IDM_BORDERLESS, IDM_FIT, IDM_ROTATE, IDM_RANGE, IDM_HIDE };
+enum VideoMenuId : int { IDM_COPY = 2001, IDM_BORDERLESS, IDM_FIT, IDM_ROTATE, IDM_RANGE, IDM_HIDE, IDM_REPLAY };
+constexpr int kReplayHotkeyId = 1;
 
 struct Snapshot {
     std::vector<uint8_t> pixels;
@@ -57,6 +63,10 @@ enum ControlId : int {
     ID_LOG,
     ID_DISP_BR,
     ID_CAST_BR,
+    ID_REPLAY_SEC,
+    ID_REPLAY_STATUS,
+    ID_REPLAY_SAVE,
+    ID_REPLAY_OPEN,
 };
 
 HINSTANCE g_instance;
@@ -71,6 +81,9 @@ Receiver g_penLink;   // 펜 모드 (47810)
 VideoPipeline g_videoPipe;
 AudioEngine g_audio;
 PenInjector g_pen;
+ReplayBuffer g_replay;
+std::atomic<bool> g_replaySaving{false};
+std::thread g_replayThread;
 ScreenSender g_screen;
 uint64_t g_lastScreenBytes = 0;
 uint64_t g_lastScreenFrames = 0;
@@ -176,6 +189,7 @@ void ReadUi() {
     g_settings.discordVolume = ItemInt(ID_DISC_VOL, g_settings.discordVolume);
     g_settings.displayBitrateMbps = std::clamp(ItemInt(ID_DISP_BR, g_settings.displayBitrateMbps), 5, 200);
     g_settings.broadcastBitrateMbps = std::clamp(ItemInt(ID_CAST_BR, g_settings.broadcastBitrateMbps), 2, 100);
+    g_settings.replaySeconds = std::clamp(ItemInt(ID_REPLAY_SEC, g_settings.replaySeconds), 5, 300);
 }
 
 std::wstring MonitorLabel(const MonitorInfo& m) {
@@ -302,6 +316,77 @@ void UpdateScreenSender(bool restart) {
     });
 }
 
+int64_t NowUs() {
+    static LARGE_INTEGER frequency = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return int64_t(now.QuadPart / frequency.QuadPart * 1000000 + now.QuadPart % frequency.QuadPart * 1000000 / frequency.QuadPart);
+}
+
+// 어느 앱을 쓰는 중이든 저장되게 전역 단축키로 건다 (기본 Ctrl+Alt+H, ini [replay] hotkey)
+void RegisterReplayHotkey() {
+    UINT mods = MOD_NOREPEAT, vk = 0;
+    for (WORD k : ParseKeyCombo(g_settings.replayHotkey)) {
+        if (k == VK_CONTROL) mods |= MOD_CONTROL;
+        else if (k == VK_MENU) mods |= MOD_ALT;
+        else if (k == VK_SHIFT) mods |= MOD_SHIFT;
+        else if (k == VK_LWIN) mods |= MOD_WIN;
+        else vk = k;
+    }
+    if (!vk) {
+        Log(L"하이라이트 단축키를 해석할 수 없음: " + g_settings.replayHotkey);
+        return;
+    }
+    if (RegisterHotKey(g_main, kReplayHotkeyId, mods, vk))
+        Log(L"하이라이트 단축키: " + g_settings.replayHotkey);
+    else
+        Log(L"하이라이트 단축키 " + g_settings.replayHotkey + L"를 다른 프로그램이 쓰고 있음 — ini [replay] hotkey에서 바꾸세요");
+}
+
+// 리플레이 하이라이트: 마지막 N초를 다시 인코딩하지 않고 MP4로 (영상 H.264 그대로, 소리 AAC)
+void SaveReplay() {
+    if (g_replaySaving.exchange(true)) {
+        Log(L"하이라이트를 저장하는 중이에요");
+        return;
+    }
+    ReplayClip clip;
+    std::string error;
+    if (!g_replay.Snapshot(clip, error)) {
+        Log(L"하이라이트 저장 실패: " + Widen(error));
+        g_replaySaving = false;
+        return;
+    }
+    UINT width = UINT(g_videoPipe.width.load()), height = UINT(g_videoPipe.height.load());
+    if (!width || !height) {
+        Log(L"하이라이트 저장 실패: 화면 크기를 아직 모름");
+        g_replaySaving = false;
+        return;
+    }
+    int turns = (wire::OrientationTurns(clip.orientation) + g_settings.rotation) & 3;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    std::wstring path = ReplayFolder() + Format(L"\\PadLink_%04d%02d%02d_%02d%02d%02d.mp4", t.wYear, t.wMonth, t.wDay,
+                                                t.wHour, t.wMinute, t.wSecond);
+    if (g_replayThread.joinable()) g_replayThread.join();
+    g_replayThread = std::thread([clip = std::move(clip), turns, width, height, path] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+        std::wstring error;
+        if (WriteReplayMp4(clip, turns, width, height, path, error))
+            Log(Format(L"하이라이트 저장: %ls (%.1f초, %.1fMB)", path.c_str(), clip.durationUs / 1e6,
+                       clip.videoBytes / 1048576.0));
+        else
+            Log(L"하이라이트 저장 실패: " + error);
+        MFShutdown();
+        CoUninitialize();
+        g_replaySaving = false;
+    });
+}
+
 void ApplyAudio() {
     if (!g_audio.Loaded()) return;
     AudioConfig c;
@@ -337,9 +422,13 @@ void ToggleConnect() {
     SaveSettings(g_settings);
     ReceiverCallbacks cb;
     cb.onVideo = [](std::vector<uint8_t>&& data, bool key, uint8_t orientation, uint64_t pts) {
+        g_replay.AddVideo(data.data(), data.size(), key, orientation, pts, NowUs());
         if (g_videoOk) g_videoPipe.Push(std::move(data), key, orientation, pts);
     };
-    cb.onAudio = [](const int16_t* pcm, size_t frames, int rate) { g_audio.Push(pcm, frames, rate); };
+    cb.onAudio = [](const int16_t* pcm, size_t frames, int rate) {
+        g_replay.AddAudio(pcm, frames, rate, NowUs());
+        g_audio.Push(pcm, frames, rate);
+    };
     cb.onConnected = [] { SendBroadcastConfig(); };
     cb.onStatus = [](const std::wstring& status) {
         auto* copy = new std::wstring(status);
@@ -521,6 +610,15 @@ void CreateControls() {
             24, ID_CAST_BR, WS_EX_CLIENTEDGE);
     Control(L"STATIC", L"Mbps (적용을 누르면 바로 바뀜)", SS_LEFT, 528, y + 4, 184, 20, -1);
 
+    y += 34;
+    Control(L"STATIC", L"리플레이 하이라이트", SS_LEFT, 12, y + 4, 150, 20, -1);
+    Control(L"EDIT", std::to_wstring(g_settings.replaySeconds).c_str(), ES_NUMBER | WS_TABSTOP, 166, y + 1, 48, 24,
+            ID_REPLAY_SEC, WS_EX_CLIENTEDGE);
+    Control(L"STATIC", L"초", SS_LEFT, 220, y + 4, 20, 20, -1);
+    Control(L"STATIC", L"", SS_LEFT, 244, y + 4, 230, 20, ID_REPLAY_STATUS);
+    Control(L"BUTTON", L"하이라이트 저장", BS_PUSHBUTTON | WS_TABSTOP, 474, y, 120, 26, ID_REPLAY_SAVE);
+    Control(L"BUTTON", L"폴더 열기", BS_PUSHBUTTON | WS_TABSTOP, 600, y, 90, 26, ID_REPLAY_OPEN);
+
     y += 40;
     Control(L"STATIC",
             L"디스코드에서는 'PadLink 화면' 창을 공유하세요(디스코드용 출력은 내가 안 듣는 장치로, 이 앱 음소거 금지). "
@@ -565,9 +663,16 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_CONNECT:
             ToggleConnect();
             return 0;
+        case ID_REPLAY_SAVE:
+            SaveReplay();
+            return 0;
+        case ID_REPLAY_OPEN:
+            ShellExecuteW(hwnd, L"open", ReplayFolder().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
         case ID_APPLY: {
             int oldDisplay = g_settings.displayBitrateMbps;
             ReadUi();
+            g_replay.SetSeconds(g_settings.replaySeconds);
             SaveSettings(g_settings);
             ApplyAudio();
             if (g_settings.displayBitrateMbps != oldDisplay && g_screen.Running()) {
@@ -631,7 +736,16 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == kStatsTimer) {
             VddTick();
             UpdateStatus();
+            ReplayBuffer::Status rs = g_replay.GetStatus(NowUs());
+            SetWindowTextW(Item(ID_REPLAY_STATUS), g_replaySaving ? L"저장 중…"
+                                                                  : Format(L"버퍼 %.1f초 · %.0fMB · %ls", rs.seconds,
+                                                                           rs.bytes / 1048576.0,
+                                                                           g_settings.replayHotkey.c_str())
+                                                                        .c_str());
         }
+        return 0;
+    case WM_HOTKEY:
+        if (wp == kReplayHotkeyId) SaveReplay();
         return 0;
     case WM_APP_LOG: {
         std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lp));
@@ -652,6 +766,8 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_DESTROY:
         KillTimer(hwnd, kStatsTimer);
+        UnregisterHotKey(hwnd, kReplayHotkeyId);
+        if (g_replayThread.joinable()) g_replayThread.join();  // 저장 중이면 끝날 때까지
         g_screen.Stop();
         if ((g_settings.vddOwned || g_settings.penMonitor == kVddChoice) && VddQuery().active) {
             std::wstring error;
@@ -764,6 +880,8 @@ void ShowVideoMenu(HWND hwnd, LPARAM lp) {
     bool borderless = g_settings.videoBorderless != 0;
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_COPY, L"복사하기\tCtrl+C");
+    AppendMenuW(menu, MF_STRING | (g_replaySaving ? MF_GRAYED : 0), IDM_REPLAY,
+                Format(L"하이라이트 저장 (마지막 %d초)\tS", g_settings.replaySeconds).c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (borderless ? MF_CHECKED : MF_UNCHECKED), IDM_BORDERLESS,
                 L"테두리 없이\tB · 더블클릭");
@@ -820,6 +938,7 @@ LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case IDM_COPY: CopyVideoFrame(); break;
+        case IDM_REPLAY: SaveReplay(); break;
         case IDM_BORDERLESS: SetVideoBorderless(g_settings.videoBorderless == 0); break;
         case IDM_FIT: FitVideoToAspect(); break;
         case IDM_ROTATE: RotateVideo(); break;
@@ -858,6 +977,7 @@ LRESULT CALLBACK VideoProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == 'B') SetVideoBorderless(g_settings.videoBorderless == 0);
         else if (wp == 'F') FitVideoToAspect();
         else if (wp == 'R') RotateVideo();
+        else if (wp == 'S') SaveReplay();
         return 0;
     case WM_CLOSE:
         // 창을 닫으면 디스코드 공유가 끊기니 숨기기만 한다
@@ -901,7 +1021,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&vc);
 
     DWORD mainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(724), S(678)};
+    RECT rc{0, 0, S(724), S(712)};
     AdjustWindowRect(&rc, mainStyle, FALSE);
     g_main = CreateWindowExW(0, L"PadLinkMain", L"PadLink 수신", mainStyle, CW_USEDEFAULT, CW_USEDEFAULT,
                              rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, instance, nullptr);
@@ -946,6 +1066,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
 
     InitAudioUi();
+    g_replay.SetSeconds(g_settings.replaySeconds);
+    RegisterReplayHotkey();
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
     SetTimer(g_main, kStatsTimer, 1000, nullptr);

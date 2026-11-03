@@ -55,6 +55,8 @@ Settings LoadSettings() {
     s.broadcastBitrateMbps = ReadInt(L"broadcast", L"bitrate_mbps", s.broadcastBitrateMbps);
     s.vddCount = ReadInt(L"display", L"vdd_count", s.vddCount);
     s.vddOwned = ReadInt(L"display", L"vdd_owned", s.vddOwned);
+    s.replaySeconds = ReadInt(L"replay", L"seconds", s.replaySeconds);
+    s.replayHotkey = ReadString(L"replay", L"hotkey", s.replayHotkey);
     return s;
 }
 
@@ -86,4 +88,6 @@ void SaveSettings(const Settings& s) {
     Write(L"broadcast", L"bitrate_mbps", s.broadcastBitrateMbps);
     Write(L"display", L"vdd_count", s.vddCount);
     Write(L"display", L"vdd_owned", s.vddOwned);
+    Write(L"replay", L"seconds", s.replaySeconds);
+    Write(L"replay", L"hotkey", s.replayHotkey);
 }

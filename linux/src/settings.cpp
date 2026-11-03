@@ -55,6 +55,7 @@ Settings LoadSettings() {
     s.borderless = ToInt(m, "borderless", s.borderless);
     s.videoW = ToInt(m, "video_w", s.videoW);
     s.videoH = ToInt(m, "video_h", s.videoH);
+    s.replaySeconds = ToInt(m, "replay_seconds", s.replaySeconds);
     return s;
 }
 
@@ -71,5 +72,6 @@ void SaveSettings(const Settings& s) {
         << "range_flip=" << s.rangeFlip << "\n"
         << "borderless=" << s.borderless << "\n"
         << "video_w=" << s.videoW << "\n"
-        << "video_h=" << s.videoH << "\n";
+        << "video_h=" << s.videoH << "\n"
+        << "replay_seconds=" << s.replaySeconds << "\n";
 }

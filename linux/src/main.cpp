@@ -15,15 +15,20 @@ extern "C" {
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "audio.h"
+#include "control.h"
 #include "decoder.h"
 #include "log.h"
 #include "net.h"
+#include "replay.h"
+#include "replay_writer.h"
 #include "settings.h"
 #include "snapshot.h"
 #include "wire.h"
@@ -34,13 +39,20 @@ constexpr const char* kFontPaths[] = {
     "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
 };
 
-enum class Action { None, Copy, Borderless, Fit, Rotate, Range, Hide };
+enum class Action { None, Copy, Borderless, Fit, Rotate, Range, Hide, SaveReplay };
 
 struct App {
     Settings settings;
     Receiver receiver;
     Decoder decoder;
     AudioOut audio;
+    ReplayBuffer replay;
+    ControlServer control;
+    std::atomic<bool> saving{false};
+    std::atomic<bool> saveRequested{false};  // 단축키(--save-replay)로 들어온 저장 요청
+    std::thread saveThread;
+    std::mutex savedMutex;
+    std::string lastSaved;
 
     SDL_Window* mainWindow = nullptr;
     SDL_Renderer* mainRenderer = nullptr;
@@ -77,17 +89,53 @@ struct App {
 
 App* g_app = nullptr;
 
-// CGImagePropertyOrientation(iPad) → 시계 방향 90도 회전 횟수
-int OrientationTurns(uint8_t orientation) {
-    switch (orientation) {
-    case 3: return 2;
-    case 6: return 1;
-    case 8: return 3;
-    default: return 0;
-    }
+int Turns(const App& a) { return (wire::OrientationTurns(a.orientation) + a.settings.rotation) & 3; }
+
+int64_t NowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
 
-int Turns(const App& a) { return (OrientationTurns(a.orientation) + a.settings.rotation) & 3; }
+// 리플레이 하이라이트: 마지막 N초를 다시 인코딩하지 않고 MP4로 (영상 H.264 그대로, 소리 AAC)
+void SaveReplay(App& a) {
+    if (a.saving.exchange(true)) {
+        Log("하이라이트를 저장하는 중이에요");
+        return;
+    }
+    ReplayClip clip;
+    std::string error;
+    if (!a.replay.Snapshot(clip, error)) {
+        Log("하이라이트 저장 실패: " + error);
+        a.saving = false;
+        return;
+    }
+    if (!a.texW || !a.texH) {
+        Log("하이라이트 저장 실패: 화면 크기를 아직 모름");
+        a.saving = false;
+        return;
+    }
+    int turns = (wire::OrientationTurns(clip.orientation) + a.settings.rotation) & 3;
+    time_t t = time(nullptr);
+    tm local{};
+    localtime_r(&t, &local);
+    char name[64];
+    strftime(name, sizeof(name), "PadLink_%Y%m%d_%H%M%S.mp4", &local);
+    std::string path = ReplayFolder() + "/" + name;
+    int w = a.texW, h = a.texH;
+    if (a.saveThread.joinable()) a.saveThread.join();
+    a.saveThread = std::thread([&a, clip = std::move(clip), turns, w, h, path] {
+        std::string error;
+        if (WriteReplayMp4(clip, turns, w, h, path, error)) {
+            Log(Format("하이라이트 저장: %s (%.1f초, %.1fMB)", path.c_str(), clip.durationUs / 1e6,
+                       clip.videoBytes / 1048576.0));
+            std::lock_guard lock(a.savedMutex);
+            a.lastSaved = path;
+        } else {
+            Log("하이라이트 저장 실패: " + error);
+        }
+        a.saving = false;
+    });
+}
 
 bool FrameFullRange(const AVFrame* f) {
     return f->color_range == AVCOL_RANGE_JPEG || f->format == AV_PIX_FMT_YUVJ420P;
@@ -219,6 +267,7 @@ void RunAction(App& a, Action action) {
         UpdateTexture(a);
         break;
     case Action::Hide: SDL_HideWindow(a.videoWindow); break;
+    case Action::SaveReplay: SaveReplay(a); break;
     case Action::None: break;
     }
 }
@@ -253,6 +302,8 @@ void RenderVideo(App& a) {
     if (ImGui::BeginPopup("video-menu")) {
         open = true;
         if (ImGui::MenuItem("복사하기", "Ctrl+C")) a.pending = Action::Copy;
+        std::string replayLabel = Format("하이라이트 저장 (마지막 %d초)", a.settings.replaySeconds);
+        if (ImGui::MenuItem(replayLabel.c_str(), "S")) a.pending = Action::SaveReplay;
         ImGui::Separator();
         if (ImGui::MenuItem("테두리 없이", "B", a.settings.borderless != 0)) a.pending = Action::Borderless;
         if (ImGui::MenuItem("영상 비율에 맞추기 (검은 여백 없애기)", "F")) a.pending = Action::Fit;
@@ -292,10 +343,14 @@ void ToggleConnect(App& a) {
     a.settings.ip = a.ipBuf;
     SaveSettings(a.settings);
     ReceiverCallbacks cb;
-    cb.onVideo = [&a](std::vector<uint8_t>&& data, bool key, uint8_t orientation) {
+    cb.onVideo = [&a](std::vector<uint8_t>&& data, bool key, uint8_t orientation, uint64_t pts) {
+        a.replay.AddVideo(data.data(), data.size(), key, orientation, pts, NowUs());
         a.decoder.Push(std::move(data), key, orientation);
     };
-    cb.onAudio = [&a](const int16_t* pcm, size_t frames, int rate) { a.audio.Push(pcm, frames, rate); };
+    cb.onAudio = [&a](const int16_t* pcm, size_t frames, int rate) {
+        a.replay.AddAudio(pcm, frames, rate, NowUs());
+        a.audio.Push(pcm, frames, rate);
+    };
     cb.onConnected = [&a] { SendBroadcastConfig(a); };
     cb.onStatus = [&a](const std::string& s) { SetLinkStatus(a, s); };
     a.receiver.Start(a.settings.mode == 1 ? LinkMode::Wifi : LinkMode::Usb, a.settings.ip, wire::kPort, cb);
@@ -408,6 +463,30 @@ void RenderControl(App& a) {
         }
     }
 
+    // 리플레이 하이라이트
+    ImGui::SeparatorText("리플레이 하이라이트 (받은 송출의 마지막 몇 초를 MP4로)");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+    if (ImGui::SliderInt("초", &a.settings.replaySeconds, 5, 300)) a.replay.SetSeconds(a.settings.replaySeconds);
+    if (ImGui::IsItemDeactivatedAfterEdit()) SaveSettings(a.settings);
+    ReplayBuffer::Status rs = a.replay.GetStatus(NowUs());
+    ImGui::SameLine();
+    ImGui::Text("버퍼 %.1f초 · %.0fMB", rs.seconds, rs.bytes / 1048576.0);
+    ImGui::BeginDisabled(a.saving.load());
+    if (ImGui::Button(a.saving ? "저장 중…" : "하이라이트 저장")) RunAction(a, Action::SaveReplay);
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("폴더 열기")) SDL_OpenURL(("file://" + ReplayFolder()).c_str());
+    ImGui::SameLine();
+    if (ImGui::Button("단축키 등록 (Ctrl+Alt+H)")) {
+        std::string message;
+        RegisterGnomeShortcut(message);
+        Log(message);
+    }
+    {
+        std::lock_guard lock(a.savedMutex);
+        if (!a.lastSaved.empty()) ImGui::TextWrapped("마지막 저장: %s", a.lastSaved.c_str());
+    }
+
     // 화면 창
     ImGui::SeparatorText("'PadLink 화면' 창");
     if (ImGui::Button("창 보이기")) {
@@ -426,8 +505,8 @@ void RenderControl(App& a) {
     if (ImGui::Button("색 범위")) RunAction(a, Action::Range);
     ImGui::TextWrapped(
         "디스코드에서는 'PadLink 화면' 창을 공유하세요 (공식 클라이언트, 소리 포함). 창에서 우클릭하면 같은 메뉴가 "
-        "나와요. 단축키: Ctrl+C 복사(원본 해상도 PNG), B 테두리, F 비율 맞추기, R 회전, C 색 범위. 테두리가 없을 "
-        "때는 아무 데나 끌어서 옮기고 가장자리로 크기를 바꿔요.");
+        "나와요. 단축키: Ctrl+C 복사(원본 해상도 PNG), S 하이라이트 저장, B 테두리, F 비율 맞추기, R 회전, C 색 범위. "
+        "테두리가 없을 때는 아무 데나 끌어서 옮기고 가장자리로 크기를 바꿔요.");
 
     // 로그
     ImGui::SeparatorText("로그");
@@ -519,6 +598,7 @@ void HandleEvent(App& a, const SDL_Event& e) {
         case SDLK_B: RunAction(a, Action::Borderless); break;
         case SDLK_F: RunAction(a, Action::Fit); break;
         case SDLK_R: RunAction(a, Action::Rotate); break;
+        case SDLK_S: RunAction(a, Action::SaveReplay); break;
         default: break;
         }
         break;
@@ -536,8 +616,10 @@ void HandleEvent(App& a, const SDL_Event& e) {
 }
 }  // namespace
 
-int main(int, char**) {
+int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
+    // 단축키용: 실행 중인 앱에 하이라이트 저장을 부탁하고 바로 끝낸다
+    if (argc > 1 && std::strcmp(argv[1], "--save-replay") == 0) return SendControlCommand("save");
     std::string dir = ConfigDir();
     LogInit(dir + "/padlink-recv.log");
     Log("PadLink 수신 (리눅스) 시작 — 설정·로그: " + dir);
@@ -578,6 +660,8 @@ int main(int, char**) {
     a.videoCtx = CreateImGui(a.videoWindow, a.videoRenderer, scale);
 
     a.decoder.Start();
+    a.replay.SetSeconds(a.settings.replaySeconds);
+    a.control.Start([&a] { a.saveRequested = true; });
     a.devices = a.audio.Devices();
     a.audio.Open(a.settings.audioDevice, a.settings.bufferMs, a.settings.volume);
 
@@ -598,6 +682,7 @@ int main(int, char**) {
             UpdateTexture(a);
         }
         a.audio.Tick();
+        if (a.saveRequested.exchange(false)) SaveReplay(a);
 
         bool videoVisible = (SDL_GetWindowFlags(a.videoWindow) & SDL_WINDOW_HIDDEN) == 0;
         if (videoVisible && (a.videoDirty || a.menuOpen || a.openMenu)) {
@@ -614,7 +699,9 @@ int main(int, char**) {
         }
     }
 
+    a.control.Stop();
     a.receiver.Stop();
+    if (a.saveThread.joinable()) a.saveThread.join();  // 저장 중이면 끝날 때까지
     a.decoder.Stop();
     a.audio.Close();
     a.settings.ip = a.ipBuf;

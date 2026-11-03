@@ -12,7 +12,7 @@ Mac과 유료 Apple 개발자 계정 없이, GitHub Actions로 빌드하고 Side
 - `windows/` — 수신 앱 (C++/Win32): USB(usbmuxd)·Wi-Fi 연결, 하드웨어 H.264 디코딩 + D3D11 화면 창,
   FMOD로 ASIO(오인페, 내 모니터링) / WASAPI(디스코드 캡처용) 동시 출력, 펜 입력, 액정타블렛
 - `linux/` — 우분투 24.04 수신 앱 (송출 받기): usbmuxd·Wi-Fi, FFmpeg 디코딩, SDL3 창·PipeWire 소리, ImGui 설정 창
-- `shared/` — 두 수신 앱이 같이 쓰는 프레임 형식(`wire.h`)과 usbmuxd 응답 파서
+- `shared/` — 두 수신 앱이 같이 쓰는 프레임 형식(`wire.h`), usbmuxd 응답 파서, 리플레이 하이라이트 버퍼(`replay.*`)
 
 ## 설치 (iPad)
 

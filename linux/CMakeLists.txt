@@ -24,7 +24,7 @@ FetchContent_Declare(stb
 FetchContent_MakeAvailable(SDL3 imgui stb)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil libswscale)
 find_package(Threads REQUIRED)
 
 add_executable(padlink-recv
@@ -36,7 +36,10 @@ add_executable(padlink-recv
   src/decoder.cpp
   src/audio.cpp
   src/snapshot.cpp
+  src/control.cpp
+  src/replay_writer.cpp
   ../shared/plist.cpp
+  ../shared/replay.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
   ${imgui_SOURCE_DIR}/imgui_tables.cpp

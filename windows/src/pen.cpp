@@ -115,6 +115,8 @@ BOOL CALLBACK AddMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM param) {
 }
 }  // namespace
 
+std::vector<WORD> ParseKeyCombo(const std::wstring& text) { return ParseCombo(text); }
+
 std::vector<MonitorInfo> ListMonitors() {
     std::vector<MonitorInfo> out;
     EnumDisplayMonitors(nullptr, nullptr, AddMonitor, reinterpret_cast<LPARAM>(&out));

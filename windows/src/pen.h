@@ -22,6 +22,9 @@ struct MonitorInfo {
 };
 std::vector<MonitorInfo> ListMonitors();
 
+// "CTRL+ALT+H" → 가상 키 목록 (수정 키가 앞). 하이라이트 단축키에도 쓴다.
+std::vector<WORD> ParseKeyCombo(const std::wstring& text);
+
 // 마지막으로 넣은 값과, 마지막 TakeRange 이후의 범위
 struct PenStats {
     bool any = false;

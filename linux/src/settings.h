@@ -13,6 +13,7 @@ struct Settings {
     int rangeFlip = 0;              // 색 범위 수동 전환
     int borderless = 0;             // 'PadLink 화면' 창 테두리 없이
     int videoW = 0, videoH = 0;     // 그 창 크기 (0이면 기본)
+    int replaySeconds = 30;         // 하이라이트로 저장할 마지막 몇 초
 };
 
 std::string ConfigDir();  // 없으면 만든다
