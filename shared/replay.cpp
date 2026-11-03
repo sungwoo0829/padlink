@@ -181,8 +181,8 @@ bool ReplayBuffer::Snapshot(ReplayClip& clip, std::string& error) const {
         std::vector<int16_t> pcm;
         cum = 0;
         for (const Chunk* c : same) {
-            int64_t frames = int64_t(c->pcm.size() / 2);
-            int64_t expectedEnd = audioOrigin + (cum + frames) * kSecond / rate;
+            int64_t count = int64_t(c->pcm.size() / 2);
+            int64_t expectedEnd = audioOrigin + (cum + count) * kSecond / rate;
             int64_t late = c->arrival - expectedEnd;
             if (late > 150000) {
                 int64_t silence = late * rate / kSecond;
@@ -190,7 +190,7 @@ bool ReplayBuffer::Snapshot(ReplayClip& clip, std::string& error) const {
                 cum += silence;
             }
             pcm.insert(pcm.end(), c->pcm.begin(), c->pcm.end());
-            cum += frames;
+            cum += count;
         }
         // 클립 시작에 맞춰 앞을 자르거나, 늦게 시작하면 그만큼 뒤로 민다
         int64_t skip = (clipStart - audioOrigin) * rate / kSecond;
