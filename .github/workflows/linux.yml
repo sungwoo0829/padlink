@@ -1,0 +1,75 @@
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+    paths: ["linux/**", "shared/**", ".github/workflows/linux.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config dpkg-dev \
+            libavcodec-dev libavutil-dev libswscale-dev \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdrm-dev libgbm-dev \
+            libpipewire-0.3-dev libpulse-dev libasound2-dev libdbus-1-dev libudev-dev
+
+      - name: Build
+        run: |
+          cmake -S linux -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build
+
+      - name: Package .deb
+        run: |
+          VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          DESTDIR="$PWD/pkgroot" cmake --install build
+          strip pkgroot/usr/bin/padlink-recv
+          mkdir -p pkgroot/usr/share/doc/padlink-recv
+          cp linux/README-linux.txt pkgroot/usr/share/doc/padlink-recv/
+          # 링크된 라이브러리에서 의존 패키지를 계산하고, 실행 중에 쓰는 것들을 더한다
+          mkdir -p debian && printf 'Source: padlink-recv\n\nPackage: padlink-recv\nArchitecture: amd64\n' > debian/control
+          SHLIBS=$(dpkg-shlibdeps -O -epkgroot/usr/bin/padlink-recv 2>/dev/null | sed -n 's/^shlibs:Depends=//p')
+          mkdir -p pkgroot/DEBIAN
+          cat > pkgroot/DEBIAN/control <<CONTROL
+          Package: padlink-recv
+          Version: ${VERSION}
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: sungwoo0829 <72420738+sungwoo0829@users.noreply.github.com>
+          Depends: ${SHLIBS}, usbmuxd, fonts-noto-cjk
+          Recommends: libpipewire-0.3-0t64 | libpipewire-0.3-0, libwayland-client0, libxkbcommon0, libdecor-0-0
+          Description: PadLink 수신 - iPad 화면과 소리를 받아 창에 띄우고 오디오 인터페이스로 재생
+           iPad PadLink 송출을 USB(usbmuxd)나 Wi-Fi로 받는다. 디스코드 창 공유용.
+          CONTROL
+          sed -i 's/^          //' pkgroot/DEBIAN/control
+          cat pkgroot/DEBIAN/control
+          dpkg-deb --build --root-owner-group pkgroot "padlink-recv_${VERSION}_amd64.deb"
+          dpkg-deb --info "padlink-recv_${VERSION}_amd64.deb"
+          cp "padlink-recv_${VERSION}_amd64.deb" padlink-recv_amd64.deb
+          ldd pkgroot/usr/bin/padlink-recv | grep -v "linux-vdso" | sed 's/ (0x.*//'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: padlink-recv-deb
+          path: padlink-recv_amd64.deb
+
+      - name: Publish linux-nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete linux-nightly --yes --cleanup-tag || true
+          gh release create linux-nightly padlink-recv_amd64.deb linux/README-linux.txt --prerelease \
+            --title "Linux nightly (Ubuntu 24.04)" --notes "커밋 ${GITHUB_SHA::7}" --target "$GITHUB_SHA"

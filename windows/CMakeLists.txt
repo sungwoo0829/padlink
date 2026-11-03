@@ -11,7 +11,7 @@ add_executable(PadLinkRecv WIN32
   src/util.cpp
   src/log.cpp
   src/settings.cpp
-  src/plist.cpp
+  ../shared/plist.cpp
   src/usbmux.cpp
   src/net.cpp
   src/video.cpp
@@ -26,6 +26,7 @@ target_compile_definitions(PadLinkRecv PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_M
   # 합성 펜(InjectSyntheticPointerInput)은 Windows 10 1809(RS5) API
   NTDDI_VERSION=0x0A000006)
 target_compile_options(PadLinkRecv PRIVATE /utf-8 /W4 /permissive- /EHsc)
+target_include_directories(PadLinkRecv PRIVATE ../shared)
 
 # NVENC 헤더(nvEncodeAPI.h, MIT 라이선스)는 FFmpeg/nv-codec-headers에서 받는다
 set(NVCODEC_INCLUDE_DIR "" CACHE PATH "nv-codec-headers/include/ffnvcodec")

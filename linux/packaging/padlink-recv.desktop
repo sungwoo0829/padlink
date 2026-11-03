@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=PadLink 수신
+Comment=iPad 화면·소리를 받아 창에 띄우고 오디오 인터페이스로 재생
+Exec=padlink-recv
+Icon=video-display
+Terminal=false
+Categories=AudioVideo;Video;
